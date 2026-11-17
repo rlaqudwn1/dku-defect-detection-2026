@@ -1,0 +1,79 @@
+# 관리 기록 규약 초안
+
+상태: 설계. 아래 필드와 JSON은 저장·검증·호출 실행기가 구현됐다는 뜻이 아니다. 예시 ID는 실제 작업이나 실험 결과가 아니다. 관측하지 않은 값은 null로 남긴다.
+
+## 식별과 연결
+
+| 기록 | 필수 내용 | 다른 기록과 연결 |
+|---|---|---|
+| 연구 질문/가설 | 관측 근거, 가정, 예측·반증 조건, 다음 행동 | EDA·실험 계획·보고서 주장 |
+| 작업 brief | task ID, domain, 질문, 범위, 대상 버전, 완료 조건, 다음 행동 | owner 역할·의존 작업·자문/검토 |
+| 자문 요청 | request ID, task ID, 역할, 질문, 입력 경로/버전, 기대 출력, 검토 범위 | 실제 호출 |
+| 실행 기록 | 요청 모델/effort, 호스트 task handle, 실제 제공 메타데이터, 입력·출력 식별, 상태·한계 | 자문 응답 또는 독립 검토 |
+| 검토 | review ID, 검토 대상 버전, 독립성, 쟁점·근거·영향·닫는 조건 | 지적 처분 |
+| 결정 | decision ID, 선택·대안·이유, 적용 범위, 남은 한계 | 채택 버전·지적 처분·다음 행동 |
+| 시간/세션 | actor/resource, 관측 구간, 출처, 마지막 관측, 미확인 구간 | 작업/run·운영 예산 |
+| 영속 저장/복구 | 목적지, 실제 파일 해시, 검증 시각·방법·증거, 복구 실행 결과 | checkpoint·run·최종 선택 |
+
+내용이 바뀌면 새 버전 또는 수정 이력을 남긴다. 대체한 결정은 `supersedes` 관계로 연결하고 이전 근거를 삭제하지 않는다. 입력의 행 순서·fitting scope·preprocess·split·모델 버전도 필요한 기록에 포함한다.
+
+## 요청과 실제 실행을 구분하는 예시
+
+```json
+{
+  "request_id": "REQ-EXAMPLE",
+  "task_id": "TASK-EXAMPLE",
+  "domain": "evaluation",
+  "role": "pair_reviewer",
+  "question": "이 검증 설계가 추정하려는 대상을 설명할 수 있는가?",
+  "target": {"commit": null, "path": null, "sha256": null},
+  "requested": {"model": null, "reasoning_effort": null},
+  "status": "planned"
+}
+```
+
+실제 호출은 요청과 별도로 기록한다.
+
+```json
+{
+  "execution_id": "EXEC-EXAMPLE",
+  "request_id": "REQ-EXAMPLE",
+  "status": "not_dispatched",
+  "host_task_handle": null,
+  "provider_invocation_id": null,
+  "observed": {"model": null, "reasoning_effort": null},
+  "input_snapshot": null,
+  "output_path": null,
+  "output_sha256": null,
+  "started_at": null,
+  "finished_at": null,
+  "limitations": ["실행하지 않은 예시"],
+  "host_receipt": null
+}
+```
+
+`host_task_handle`과 provider 실행 ID는 같은 것으로 취급하지 않는다. 모델·effort는 요청값과 호스트가 실제 제공한 값을 구분한다. 별도 호출의 증거와 다른 모델 사용의 증거도 구분한다.
+
+## 페어리뷰와 처분
+
+검토 한 건은 `대상 commit/파일 해시 → 별도 호출 → 응답 → 쟁점 → 처분`으로 이어진다.
+
+- 쟁점: ID, 주장, 정확한 근거, 실패 방식, 중요도, 어떤 행동에 영향을 주는지, 닫는 증거.
+- 처분: fixed / accepted-risk / deferred / rejected 중 선택, 근거와 이유, 담당·다음 행동.
+- `fixed`에는 실제 변경과 검사 증거가 필요하다. 설계에 문장만 넣었다면 `design-addressed; implementation/evidence pending`으로 남긴다.
+- 작성자가 제안대로 수정하면 대상 해시는 바뀐다. 과거 검토가 최신본 전체를 검증한 것으로 표시하지 않는다.
+- 검토자가 같은 산출물을 직접 고쳤다면 그 부분은 수정/자문이며 독립 검토와 구분한다.
+
+최초 구현의 기본 호출 예산은 검토 한 차수와 처분 한 차수다. 사실 충돌은 원문·작은 검사로 해결하고, 여러 타당한 선택은 사전 비용·단순성·성능 기준으로 결정한다. 중요한 사실이 미확인이면 해당 사실에 의존하는 행동만 보류한다.
+
+## 시간과 예약 기록
+
+사람의 작업 구간은 actor별, GPU 관측 구간은 실제 resource별로 식별한다. 중복 구간은 각각 합집합으로 집계한다. 다른 resource의 GPU 시간은 합산할 수 있지만 달력 경과·사람 시간과 섞지 않는다. 학습/검증 시간은 GPU 세션의 하위 설명일 수 있으므로 이중 합산하지 않는다.
+
+예약은 앞으로 필요한 양이다. 실제 관측이 늘면 같은 작업의 예약에서 소비하고, 종료·취소하면 남은 예약을 해제한다. 예산 수정은 사유와 이전 값을 보존한다. 숫자가 없으면 null이고, 제공받지 않은 Colab quota는 항상 unknown이다.
+
+## 보존·검증 범위
+
+단일 진행자가 작은 기록을 갱신하는 안으로 시작한다. 파일 갱신은 전체 성공·부분 실패가 섞이지 않도록 구현할 예정이다. 병렬 작성과 트랜잭션 요구가 생기면 저장 형식을 재검토한다. 아직 append-only event store나 SQLite가 구현된 것은 아니다.
+
+검사기는 향후 중복 ID, 없는 참조, 뒤집힌 시간 구간, 음수/비유한 예산, 독립 검토의 자기 호출, 바뀐 입력·출력 해시, 증거 없는 durable/complete 표기를 거절해야 한다. 실제 원격 파일·Colab 상태·과학적 타당성은 기록 스키마만으로 증명하지 않는다.

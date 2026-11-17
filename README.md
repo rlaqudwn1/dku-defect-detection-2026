@@ -2,11 +2,14 @@
 
 개인 대회용 비공개 연구 저장소. 실험 기록은 W&B, 첫 실행 환경은 무료 Colab, 원본 데이터와 복구본은 Google Drive를 사용한다.
 
-**현재 단계는 기획 구체화다.** 데이터 인계 자료와 검증 도구, 설계 문서는 준비됐으며 학습·튜닝·앙상블·재현 검사 실행기는 아직 구현하지 않았다. 실제 대회 모델이나 성능 결과는 없다.
+**현재 단계는 설계 구체화다. 구현은 추가하지 않는다.** 데이터 인계 자료와 검증 도구, 설계 문서는 준비됐으며 학습·튜닝·앙상블·재현 검사 실행기는 아직 구현하지 않았다. 실제 대회 모델이나 성능 결과는 없다.
 
 ## 먼저 읽기
 
+- [Astra medium 설계 리뷰](docs/reviews/2026-11-17-astra-medium-design-review.md)와 [설계 후속](docs/reviews/ASTRA-FOLLOWUP.md).
 - [Astra high 독립 검토](docs/reviews/2026-11-17-astra-high-review.md): 기준 기획의 15개 보완 항목과 수정 우선순위.
+- [연구 관리 메타 하네스 설계](docs/MANAGEMENT-HARNESS.md): 도메인별 자문·페어리뷰·결정 절차.
+- [가설·EDA·특징 계층](docs/HYPOTHESES-AND-DATA.md), [시간·Colab 운영](docs/RESEARCH-OPERATIONS.md), [기록 규약](docs/harness/RECORDS.md).
 - [구체 기획서](docs/PLAN.md): 필수 기능, 실행 흐름, 완료 기준, 구현 순서.
 - [아키텍처 선택 근거](docs/ARCHITECTURE.md): 가벼운 오픈소스 기반 비교와 현재 제안.
 - [무료 Colab 판단 계획](docs/COLAB.md): 데이터에서 확인한 사실과 첫 실측 절차.
@@ -47,8 +50,10 @@ experiments/            실험 가설·설정 연결과 검토한 결과 기록
 models/                 로컬 가중치 캐시 (바이너리는 Git 제외)
 submissions/            제출 CSV·제출 선택 기록 (CSV는 Git 제외)
 reports/                기술보고서 원고·비교표·그림
-docs/                  기획·설계·운영 절차
+docs/                   기획·설계·운영 절차
 tests/                 이후 실행기의 누수·재현·정렬 검사
 ```
 
 CCDS의 폴더 역할을 참고한 구성이다. 템플릿 전체나 별도 실험 서버를 도입하지 않았다. W&B 계정 연결과 Artifact 저장소 생성도 아직 수행하지 않았다.
+
+완성될 연구 하네스의 역할별 모델·effort는 이후 별도로 구성한다. 현재 저장소 구축 작업의 에이전트 배분과 구분한다.
