@@ -6,6 +6,7 @@
 
 ## 먼저 읽기
 
+- [Astra high 독립 검토](docs/reviews/2026-11-17-astra-high-review.md): 기준 기획의 15개 보완 항목과 수정 우선순위.
 - [구체 기획서](docs/PLAN.md): 필수 기능, 실행 흐름, 완료 기준, 구현 순서.
 - [아키텍처 선택 근거](docs/ARCHITECTURE.md): 가벼운 오픈소스 기반 비교와 현재 제안.
 - [무료 Colab 판단 계획](docs/COLAB.md): 데이터에서 확인한 사실과 첫 실측 절차.
