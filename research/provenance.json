@@ -1,0 +1,39 @@
+{
+  "origin_repo": "https://github.com/rlaqudwn1/personal-wiki",
+  "source_handoff_commit": "0cc29c1",
+  "notes": [
+    "course notice and competition rules copied byte-exact from personal-wiki",
+    "data description supplied by user in conversation on 2026-11-17",
+    "image profile from JPEG header inspection on 2026-11-17; no Colab GPU benchmark"
+  ],
+  "files": [
+    {
+      "path": "research/course-notice.md",
+      "sha256": "81f394fa09ad6f899c2fd4c73bf05435681212a6d196b1a6819b69432e8fe709"
+    },
+    {
+      "path": "research/competition-rules.md",
+      "sha256": "b930ed1b1dabb48a266bb5bb53a62192bc010f9a32b34289323220714ddd322a"
+    },
+    {
+      "path": "research/data-description.md",
+      "sha256": "876631e715d0631045b51713a552961d0e22fd49ec94f0d948d0bb4d3f2a5b05"
+    },
+    {
+      "path": "data/manifests/data-manifest.json",
+      "sha256": "617adc706d4bf03357b3c9be51269f9d3dbfb1bb712d022d32b449d99fbade4c"
+    },
+    {
+      "path": "data/manifests/archive.json",
+      "sha256": "d242b7a93b9ca5e42f2ca47c526a9ec7cab8819ce1aa1bfae28c13a109cfede5"
+    },
+    {
+      "path": "data/manifests/image-profile.json",
+      "sha256": "999e8b29a8573ff3ca3bf93dd1775f29d09d8e1f91701f8cab26af4240560118"
+    },
+    {
+      "path": "research/prior-competition-workflow.md",
+      "sha256": "b95dabbf653e7b718c14d5632a78659edbcb4daf9e3f5ceb68f11a5a6e968d58"
+    }
+  ]
+}

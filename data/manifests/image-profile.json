@@ -1,0 +1,87 @@
+{
+  "method": "JPEG SOF header inspection; no pixel decode or GPU benchmark",
+  "splits": {
+    "train": {
+      "count": 10821,
+      "shapes": [
+        {
+          "width": 1500,
+          "height": 1000,
+          "components": 3,
+          "count": 3502
+        },
+        {
+          "width": 1404,
+          "height": 1070,
+          "components": 3,
+          "count": 2205
+        },
+        {
+          "width": 1562,
+          "height": 960,
+          "components": 3,
+          "count": 1106
+        },
+        {
+          "width": 1358,
+          "height": 1104,
+          "components": 3,
+          "count": 1105
+        },
+        {
+          "width": 1284,
+          "height": 1168,
+          "components": 3,
+          "count": 1100
+        },
+        {
+          "width": 1342,
+          "height": 1118,
+          "components": 3,
+          "count": 603
+        },
+        {
+          "width": 1274,
+          "height": 1176,
+          "components": 3,
+          "count": 600
+        },
+        {
+          "width": 1300,
+          "height": 1154,
+          "components": 3,
+          "count": 600
+        }
+      ]
+    },
+    "test": {
+      "count": 800,
+      "shapes": [
+        {
+          "width": 304,
+          "height": 304,
+          "components": 3,
+          "count": 462
+        },
+        {
+          "width": 288,
+          "height": 288,
+          "components": 3,
+          "count": 264
+        },
+        {
+          "width": 608,
+          "height": 608,
+          "components": 3,
+          "count": 62
+        },
+        {
+          "width": 615,
+          "height": 615,
+          "components": 3,
+          "count": 12
+        }
+      ]
+    }
+  }
+}
