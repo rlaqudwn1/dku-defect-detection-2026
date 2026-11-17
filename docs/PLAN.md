@@ -6,6 +6,7 @@
 
 현재는 설계 단계다. 구현은 추가하지 않는다. [Astra 전체 리뷰](reviews/2026-11-17-astra-high-review.md)의 지적을 바탕으로 다음을 별도 설계했다.
 
+- [기본 코드베이스·우리 구현 범위·대회 모델 관리](CODEBASE-AND-MODEL-MANAGEMENT.md)
 - [가설·EDA·카탈로그·특징 캐시](HYPOTHESES-AND-DATA.md)
 - [도메인별 자문·페어리뷰·결정의 메타 하네스](MANAGEMENT-HARNESS.md)
 - [연구 시간·무료 Colab·예산·복구](RESEARCH-OPERATIONS.md)

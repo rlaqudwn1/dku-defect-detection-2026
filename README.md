@@ -8,6 +8,7 @@
 
 - [Astra medium 설계 리뷰](docs/reviews/2026-11-17-astra-medium-design-review.md)와 [설계 후속](docs/reviews/ASTRA-FOLLOWUP.md).
 - [Astra high 독립 검토](docs/reviews/2026-11-17-astra-high-review.md): 기준 기획의 15개 보완 항목과 수정 우선순위.
+- [기본 코드베이스·대회 모델 관리](docs/CODEBASE-AND-MODEL-MANAGEMENT.md): 재사용할 기반, 우리 패키지 경계, 모델·가중치·평가·선택의 관계.
 - [연구 관리 메타 하네스 설계](docs/MANAGEMENT-HARNESS.md): 도메인별 자문·페어리뷰·결정 절차.
 - [가설·EDA·특징 계층](docs/HYPOTHESES-AND-DATA.md), [시간·Colab 운영](docs/RESEARCH-OPERATIONS.md), [기록 규약](docs/harness/RECORDS.md).
 - [구체 기획서](docs/PLAN.md): 필수 기능, 실행 흐름, 완료 기준, 구현 순서.
