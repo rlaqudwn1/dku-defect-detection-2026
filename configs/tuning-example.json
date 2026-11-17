@@ -1,0 +1,1 @@
+{"max_candidates":2,"time_budget_seconds":600,"candidates":[{"config":{"model":"resnet18","image_size":256,"batch_size":16,"epochs":1,"lr":0.001,"seed":42,"device":"cuda","amp":true,"tracking":{"mode":"disabled"}}},{"config":{"model":"resnet18","image_size":256,"batch_size":16,"epochs":1,"lr":0.0003,"seed":42,"device":"cuda","amp":true,"tracking":{"mode":"disabled"}}}]}

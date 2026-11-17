@@ -1,0 +1,14 @@
+# A starting whole-image baseline, not a measured competition recommendation.
+model = "resnet18"
+image_size = 256
+batch_size = 16
+epochs = 3
+lr = 0.001
+weight_decay = 0.0001
+seed = 42
+device = "cuda"
+amp = true
+num_workers = 0
+
+[tracking]
+mode = "disabled"

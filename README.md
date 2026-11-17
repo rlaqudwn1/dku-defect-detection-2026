@@ -1,61 +1,29 @@
-# DKU 제품 이미지 불량 탐지 대회
+# DKU 제품 이미지 불량 탐지 연구 도구
 
-개인 대회용 비공개 연구 저장소. 실험 기록은 W&B, 첫 실행 환경은 무료 Colab, 원본 데이터와 복구본은 Google Drive를 사용한다.
+이미지당 불량 확률 하나를 만드는 가벼운 Python 연구 코드다. 라벨은 `0=정상`, `1=불량`이며 전체 검증 예측으로 AUROC를 계산한다. 공개 저장소에는 데이터·가중치·예측·인증정보를 넣지 않는다.
 
-**현재 단계는 설계 구체화다. 구현은 추가하지 않는다.** 데이터 인계 자료와 검증 도구, 설계 문서는 준비됐으며 학습·튜닝·앙상블·재현 검사 실행기는 아직 구현하지 않았다. 실제 대회 모델이나 성능 결과는 없다.
-
-## 먼저 읽기
-
-- [Astra medium 설계 리뷰](docs/reviews/2026-11-17-astra-medium-design-review.md)와 [설계 후속](docs/reviews/ASTRA-FOLLOWUP.md).
-- [Astra high 독립 검토](docs/reviews/2026-11-17-astra-high-review.md): 기준 기획의 15개 보완 항목과 수정 우선순위.
-- [기본 코드베이스·대회 모델 관리](docs/CODEBASE-AND-MODEL-MANAGEMENT.md): 재사용할 기반, 우리 패키지 경계, 모델·가중치·평가·선택의 관계.
-- [연구 관리 메타 하네스 설계](docs/MANAGEMENT-HARNESS.md): 도메인별 자문·페어리뷰·결정 절차.
-- [가설·EDA·특징 계층](docs/HYPOTHESES-AND-DATA.md), [시간·Colab 운영](docs/RESEARCH-OPERATIONS.md), [기록 규약](docs/harness/RECORDS.md).
-- [구체 기획서](docs/PLAN.md): 필수 기능, 실행 흐름, 완료 기준, 구현 순서.
-- [아키텍처 선택 근거](docs/ARCHITECTURE.md): 가벼운 오픈소스 기반 비교와 현재 제안.
-- [무료 Colab 판단 계획](docs/COLAB.md): 데이터에서 확인한 사실과 첫 실측 절차.
-- [보고서 문맥 관리 하네스](docs/REPORT-CONTEXT-HARNESS.md): 절별 작성 근거·주장 추적·변경 영향·페어리뷰·제출본 고정.
-- [보고서 작성 계획](reports/WRITING-PLAN.md): 실험과 본문·표·그림을 연결하는 방법.
-- [과거 대회 준비 조사](research/prior-competition-workflow.md): 10월 27일 조사 이력이며 현재 결정은 기획서를 따른다.
-- [대회 규정](research/competition-rules.md), [수업 공지](research/course-notice.md), [라벨·출력 정의](research/data-description.md).
-
-## 확정된 과제
-
-- 라벨: `0=정상`, `1=불량`. 양성 클래스는 불량이다.
-- 이미지에 제품이 여러 개 있어도 이미지당 `anomaly_score` 하나를 제출한다.
-- 학습 이미지 10,821장(정상 9,621, 불량 1,200), 테스트 800장.
-- 제출 컬럼: `image_path,anomaly_score`. UTF-8 CSV이며 예시 파일의 순서를 보존한다.
-- 지표: AUROC. 대회 순위는 Private 100%, 수업 프로젝트 평가는 기존 공지 기준 성능 35% + 기술보고서 65%.
-
-## 데이터와 현재 실행 가능한 검증
-
-[Drive 대회 자료](https://drive.google.com/drive/folders/1cmRjMCGqH4WpMo7hUJqVc_fS2H6eBvP4)의 `open.zip`을 내려받아 프로젝트 밖이나 `data/raw/`에 푼다. Git에는 이미지와 가중치를 넣지 않는다. 원본 파일은 수정하지 않는다.
+v0.1은 데이터 검사/픽셀 카탈로그/중복 그룹 분할, ResNet18 학습·epoch 경계 재개·고정 가중치 평가·CSV 추론, 작은 순차 튜닝·확률 앙상블·재현 검사, 로컬/W&B 기록, 관리 장부·보고서 근거 묶음을 제공한다. 실제 대회 GPU 학습·성능 측정·제출은 아직 수행하지 않았다. 무료 Colab GPU와 W&B cloud 연결도 미검증이다.
 
 ```bash
-python -m zipfile -e /path/to/open.zip /path/to/data
-python scripts/verify_data.py /path/to/data/open
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[data,vision,tracking,dev]'
+defectlab --help
 ```
 
-검증 도구는 Python 표준 라이브러리만 사용한다. 데이터 목록·압축파일 해시는 `data/manifests/`에 있다. Drive 원본에는 사용자 계정으로 접근하며 공개 공유를 요구하지 않는다.
+관리·보고서만 필요하면 `python -m pip install -e .`로 설치한다. PyTorch는 실행 환경에 맞는 CPU/CUDA 빌드를 먼저 설치할 수 있다. [정확한 실행·복구 절차](docs/RUNBOOK.md), [Colab notebook](notebooks/colab.ipynb), [환경 기록](requirements-verified-cpu.txt), [실제 검증 범위](docs/IMPLEMENTATION-VALIDATION.md)를 참고한다.
 
-## 폴더 역할
-
-```text
-configs/                 모델·전처리·학습 설정 (실행기 구현 시 추가)
-data/manifests/          데이터 파일 목록·해시·이미지 크기 조사
-data/splits/            고정 검증 분할과 분할 해시
-src/defectlab/           이후 구현할 공통 학습·평가·추론 코드
-scripts/                검증 도구와 이후 보고서 집계 명령
-notebooks/              Colab 진입점·탐색 노트북 (이후 구현)
-research/               공식 규정·논문·코드의 근거 카드
-experiments/            실험 가설·설정 연결과 검토한 결과 기록
-models/                 로컬 가중치 캐시 (바이너리는 Git 제외)
-submissions/            제출 CSV·제출 선택 기록 (CSV는 Git 제외)
-reports/                기술보고서 원고·비교표·그림
-docs/                   기획·설계·운영 절차
-tests/                 이후 실행기의 누수·재현·정렬 검사
+```bash
+defectlab verify data/raw/open --manifest /path/to/private-manifest.json
+defectlab profile data/raw/open runs/eda
+defectlab split runs/eda/profile.json runs/split.json
+defectlab train data/raw/open runs/split.json configs/baseline.toml runs/baseline
 ```
 
-CCDS의 폴더 역할을 참고한 구성이다. 템플릿 전체나 별도 실험 서버를 도입하지 않았다. W&B 계정 연결과 Artifact 저장소 생성도 아직 수행하지 않았다.
+`configs/baseline.toml`은 CUDA 출발 설정이다. CPU에서는 `device="cpu"`, `amp=false`로 별도 설정을 만든다. 256 입력의 적절성·근접 중복·촬영 종속성은 연구로 확인해야 한다. exact duplicate 분리가 독립성을 보증하지 않는다.
 
-완성될 연구 하네스의 역할별 모델·effort는 이후 별도로 구성한다. 현재 저장소 구축 작업의 에이전트 배분과 구분한다.
+원본은 `train.csv`, `train/`, `sample_submission.csv`, `test/`를 포함하는 로컬 디렉터리로 전달한다. 원본을 수정하지 않는다. 검증 manifest는 데이터 소유자가 비공개로 전달하며 기본 공개 manifest로 강제하지 않는다.
+
+규칙: 제공 학습 데이터만 학습하고 테스트 정답·외부 원본/공개 라벨을 조회하지 않는다. 원격 모델 추론 API를 사용하지 않는다. 사전학습은 2026-11-15까지 공개된 가중치의 출처·버전·라이선스·해시를 확인한 로컬 파일만 허용한다. 기본은 무작위 초기화다. 대회 제출과 GPU 결제는 자동 수행하지 않는다.
+
+설계와 연구 책임은 [계획](docs/PLAN.md), [아키텍처](docs/ARCHITECTURE.md), [관리 하네스](docs/MANAGEMENT-HARNESS.md), [보고서 문맥](docs/REPORT-CONTEXT-HARNESS.md)에 보존한다. 이 문서들의 과거 설계 상태 설명은 당시 이력이며 현재 실행 계약은 RUNBOOK과 소스·테스트를 따른다. 미래 연구 하네스의 역할별 LLM 모델·effort는 아직 미정이다.

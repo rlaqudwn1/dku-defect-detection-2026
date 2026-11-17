@@ -1,0 +1,1 @@
+{"id":"TASK-P000","kind":"task","owner":"researcher","status":"planned","question":"Measure the assigned environment before long experiments","completion_conditions":["actual epoch timing and checkpoint recovery evidence"],"next_action":"Run a bounded measured baseline; preserve outcomes"}

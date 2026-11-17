@@ -20,3 +20,5 @@ models/*
 !models/README.md
 submissions/*
 !submissions/README.md
+
+*.egg-info/
