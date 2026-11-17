@@ -14,6 +14,7 @@
 - [구체 기획서](docs/PLAN.md): 필수 기능, 실행 흐름, 완료 기준, 구현 순서.
 - [아키텍처 선택 근거](docs/ARCHITECTURE.md): 가벼운 오픈소스 기반 비교와 현재 제안.
 - [무료 Colab 판단 계획](docs/COLAB.md): 데이터에서 확인한 사실과 첫 실측 절차.
+- [보고서 문맥 관리 하네스](docs/REPORT-CONTEXT-HARNESS.md): 절별 작성 근거·주장 추적·변경 영향·페어리뷰·제출본 고정.
 - [보고서 작성 계획](reports/WRITING-PLAN.md): 실험과 본문·표·그림을 연결하는 방법.
 - [과거 대회 준비 조사](research/prior-competition-workflow.md): 10월 27일 조사 이력이며 현재 결정은 기획서를 따른다.
 - [대회 규정](research/competition-rules.md), [수업 공지](research/course-notice.md), [라벨·출력 정의](research/data-description.md).

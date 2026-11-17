@@ -10,6 +10,7 @@
 - [가설·EDA·카탈로그·특징 캐시](HYPOTHESES-AND-DATA.md)
 - [도메인별 자문·페어리뷰·결정의 메타 하네스](MANAGEMENT-HARNESS.md)
 - [연구 시간·무료 Colab·예산·복구](RESEARCH-OPERATIONS.md)
+- [보고서 작성 문맥 관리 하네스](REPORT-CONTEXT-HARNESS.md)
 - [입출력·검토·실행 기록 규약](harness/RECORDS.md)
 - [첫 실행 설정과 이식 가능한 재현 묶음](FIRST-RUN-AND-REPRODUCTION.md)
 - [Astra 지적별 설계 대응과 남은 증거](reviews/ASTRA-FOLLOWUP.md)

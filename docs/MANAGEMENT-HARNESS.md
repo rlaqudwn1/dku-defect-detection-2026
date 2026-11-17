@@ -122,3 +122,5 @@ management/
 [기록 규약](harness/RECORDS.md), [시간·Colab 설계](RESEARCH-OPERATIONS.md), [가설·데이터 설계](HYPOTHESES-AND-DATA.md)를 함께 사용한다.
 
 [우리 코드베이스와 대회 모델 수명주기](CODEBASE-AND-MODEL-MANAGEMENT.md)도 이 관리 대상에 포함한다. 모델 구조·학습 run·checkpoint·평가·최종 선택과 에이전트의 LLM 설정을 구분한다.
+
+보고서 도메인의 작성 문맥·주장·절별 근거와 유효성은 [보고서 문맥 하네스](REPORT-CONTEXT-HARNESS.md)에서 구체화한다. 공통 요청/실행/검토/처분 기록을 재사용하며 별도 승인 조직을 만들지 않는다.
