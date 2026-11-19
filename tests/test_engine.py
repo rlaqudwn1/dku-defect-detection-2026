@@ -409,6 +409,53 @@ class TrackingTests(unittest.TestCase):
             self.assertTrue(receipt['upload_acknowledged'])
             run.finish.assert_called_once_with(exit_code=1)
 
+    def test_upload_artifacts_false_skips_remote_upload_and_records_local_hash(self):
+        from defectlab.tracking import Tracker
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            weight = output / 'weights.bin'
+            weight.write_bytes(b'local-only checkpoint bytes')
+            run = MagicMock()
+            sdk = types.SimpleNamespace(init=MagicMock(return_value=run),
+                                        Settings=MagicMock(), Artifact=MagicMock())
+            with patch.dict(sys.modules, {'wandb': sdk}):
+                tracker = Tracker(
+                    output,
+                    {'mode': 'online', 'entity': 'team', 'project': 'project',
+                     'upload_artifacts': False, 'group': 'compare-256-512'},
+                    'run-local-ckpt',
+                    {'seed': 42},
+                )
+                receipt = tracker.artifact(weight, 'model')
+                tracker.finish()
+            sdk.Artifact.assert_not_called()
+            run.log_artifact.assert_not_called()
+            self.assertEqual(sdk.init.call_args.kwargs['group'], 'compare-256-512')
+            self.assertEqual(receipt['sha256'], hash_file(weight))
+            self.assertFalse(receipt['upload_acknowledged'])
+            self.assertIsNone(receipt['cloud_version'])
+
+    def test_reuse_active_run_keeps_sweep_agent_run_open(self):
+        from defectlab.tracking import Tracker
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary)
+            active_run = MagicMock()
+            sdk = types.SimpleNamespace(run=active_run, init=MagicMock(),
+                                        Settings=MagicMock(), Artifact=MagicMock())
+            with patch.dict(sys.modules, {'wandb': sdk}):
+                tracker = Tracker(
+                    output,
+                    {'mode': 'online', 'reuse_active_run': True, 'upload_artifacts': False},
+                    'run-in-sweep',
+                    {'lr': 3e-4},
+                )
+                tracker.log({'val_auroc': 0.8}, step=1)
+                tracker.finish('completed')
+            sdk.init.assert_not_called()
+            active_run.config.update.assert_called_once_with({'lr': 3e-4}, allow_val_change=True)
+            active_run.log.assert_any_call({'val_auroc': 0.8}, step=1)
+            active_run.finish.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

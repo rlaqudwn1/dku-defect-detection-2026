@@ -1,0 +1,17 @@
+# W&B online tracking preset (personal entity, CV project; checkpoints stay local in runs/).
+model = "resnet18"
+image_size = 256
+batch_size = 32
+epochs = 5
+lr = 0.0003
+weight_decay = 0.0001
+seed = 42
+device = "cuda"
+amp = true
+num_workers = 0
+
+[tracking]
+mode = "online"
+entity = "rlaqudwn123456-dankook-university"
+project = "CV"
+upload_artifacts = false

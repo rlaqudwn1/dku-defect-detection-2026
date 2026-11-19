@@ -9,21 +9,45 @@ class Tracker:
         self.path = Path(output_dir) / 'events.jsonl'
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.run = None
+        self._owns_run = False
         mode = config.get('mode', 'disabled')
         self.mode = mode
         self.artifact_wait_seconds = config.get('artifact_wait_seconds', 60)
+        self.upload_artifacts = config.get('upload_artifacts', True)
+        reuse_active_run = config.get('reuse_active_run', False)
         if mode not in {'disabled', 'offline', 'online'}:
             raise ValueError('tracking.mode must be disabled, offline or online')
         if not 0 < self.artifact_wait_seconds <= 60:
             raise ValueError('artifact_wait_seconds must be in (0, 60]')
+        if type(self.upload_artifacts) is not bool:
+            raise ValueError('tracking.upload_artifacts must be boolean')
+        if type(reuse_active_run) is not bool:
+            raise ValueError('tracking.reuse_active_run must be boolean')
         self.log({'event': 'tracking_started', 'run_id': run_id, 'mode': mode})
         if mode != 'disabled':
             import wandb
-            self.run = wandb.init(project=config.get('project', 'defectlab'),
-                                  entity=config.get('entity'), id=run_id,
-                                  mode=mode, dir=str(Path(output_dir).resolve()),
-                                  config=resolved_config, resume='allow' if mode == 'online' else None,
-                                  settings=wandb.Settings(disable_git=True, save_code=False))
+            active = getattr(wandb, 'run', None) if reuse_active_run else None
+            if active is not None:
+                self.run = active
+                self._owns_run = False
+                if hasattr(active, 'config') and hasattr(active.config, 'update'):
+                    active.config.update(resolved_config, allow_val_change=True)
+            else:
+                init_kwargs = {
+                    'project': config.get('project', 'defectlab'),
+                    'entity': config.get('entity'),
+                    'id': run_id,
+                    'mode': mode,
+                    'dir': str(Path(output_dir).resolve()),
+                    'config': resolved_config,
+                    'resume': 'allow' if mode == 'online' else None,
+                    'settings': wandb.Settings(disable_git=True, save_code=False),
+                }
+                for optional_key in ('name', 'group', 'tags', 'job_type'):
+                    if config.get(optional_key) is not None:
+                        init_kwargs[optional_key] = config[optional_key]
+                self.run = wandb.init(**init_kwargs)
+                self._owns_run = True
 
     def log(self, values, step=None):
         record = {'time': datetime.now(timezone.utc).isoformat(), **values}
@@ -43,7 +67,7 @@ class Tracker:
                    'upload_acknowledged': False}
         # Persist intent and byte identity even when SDK upload fails.
         self.log({**receipt, 'event': 'artifact_started'})
-        if self.run is not None:
+        if self.run is not None and self.upload_artifacts:
             import wandb
             artifact = wandb.Artifact(name=name, type=kind, metadata={'sha256': receipt['sha256']})
             artifact.add_file(str(path))
@@ -58,5 +82,5 @@ class Tracker:
 
     def finish(self, status='completed'):
         self.log({'event': 'finished', 'status': status})
-        if self.run is not None:
+        if self.run is not None and self._owns_run:
             self.run.finish(exit_code=0 if status == 'completed' else 1)

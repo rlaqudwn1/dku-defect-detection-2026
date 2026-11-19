@@ -61,6 +61,11 @@ def _config(path):
     for key in ('lr', 'weight_decay'):
         if not math.isfinite(cfg[key]) or cfg[key] < 0 or (key == 'lr' and cfg[key] == 0):
             raise ValueError(f'invalid {key}')
+    if not isinstance(cfg['tracking'], dict):
+        raise ValueError('tracking must be an object')
+    for key in ('upload_artifacts', 'reuse_active_run'):
+        if key in cfg['tracking'] and type(cfg['tracking'][key]) is not bool:
+            raise ValueError(f'tracking.{key} must be boolean')
     if cfg.get('max_runtime_seconds') is not None and (not math.isfinite(cfg['max_runtime_seconds']) or cfg['max_runtime_seconds'] <= 0):
         raise ValueError('max_runtime_seconds must be finite and positive')
     return cfg
