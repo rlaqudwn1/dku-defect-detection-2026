@@ -39,6 +39,7 @@ v0.1은 데이터 검사/픽셀 카탈로그/중복 그룹 분할, ResNet18 학�
 |---|---|---|
 | `src/defectlab/cli.py` | 명령 인자와 모듈 분기 | `defectlab --help` |
 | `src/defectlab/data.py` | 원본 검사·픽셀 조사·그룹 분할 | `verify`, `profile`, `split` |
+| `src/defectlab/eda.py` | 중복 감사·블라인드 표본·변환 비교 | `audit-duplicates`, `sample-eda`, `compare-transforms` |
 | `src/defectlab/engine.py` | 전처리·학습·재개·평가·추론·결합·재현 | `train`, `tune`, `evaluate`, `predict`, `ensemble`, `reproduce` |
 | `src/defectlab/selection.py` | 검증·테스트 출처와 재현 기록을 연결한 선택 | `select` |
 | `src/defectlab/tracking.py` | 로컬 이벤트와 선택적 W&B 기록 | `events.jsonl`, Artifact 영수증 |

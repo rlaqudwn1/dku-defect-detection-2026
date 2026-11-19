@@ -1,6 +1,7 @@
 """Explicit local commands; heavy dependencies are imported only when needed."""
 import argparse
 import json
+from pathlib import Path
 import sys
 
 
@@ -13,6 +14,22 @@ def parser():
     p = commands.add_parser("profile")
     p.add_argument("data_root")
     p.add_argument("output_dir")
+    p = commands.add_parser("audit-duplicates", help="Audit file, pixel and dHash duplicates")
+    p.add_argument("data_root")
+    p.add_argument("output_dir")
+    p.add_argument("--split", help="Optional split JSON with train_ids and val_ids")
+    p.add_argument("--max-hamming", type=int, default=6, help="Maximum dHash distance (default: 6)")
+    p.add_argument("--top-k", type=int, default=100, help="Pairs per candidate list (default: 100)")
+    p = commands.add_parser("sample-eda", help="Draw stratified samples and build blind review sheets")
+    p.add_argument("profile")
+    p.add_argument("data_root")
+    p.add_argument("output_dir")
+    p.add_argument("--config", help="Sampling JSON (defaults to the eda-first-look-v1 settings)")
+    p = commands.add_parser("compare-transforms", help="Compare baseline resize/pad with original image detail")
+    p.add_argument("data_root")
+    p.add_argument("output_dir")
+    p.add_argument("--ids", nargs="+", required=True, help="Image IDs, a JSON array file, or a text list file")
+    p.add_argument("--sizes", nargs="+", type=int, default=[256, 384, 512], help="Sizes (default: 256 384 512)")
     p = commands.add_parser("split")
     p.add_argument("profile")
     p.add_argument("output")
@@ -93,6 +110,51 @@ def dispatch(a):
         if a.command == "profile":
             return data.profile(a.data_root, a.output_dir)
         return data.make_split(a.profile, a.output, a.seed, a.val_fraction, a.groups)
+    if a.command == "audit-duplicates":
+        from .eda import audit_duplicates
+        report = audit_duplicates(a.data_root, a.output_dir, a.split, a.max_hamming, a.top_k)
+        return {
+            "schema_version": report["schema_version"],
+            "ok": report["ok"],
+            "report_path": str(Path(a.output_dir).resolve() / "duplicate_audit.json"),
+            "dataset_hash": report["dataset_hash"],
+            "split_sha256": report["split_sha256"],
+            "split_file_sha256": report["split_file_sha256"],
+            "max_hamming": report["max_hamming"],
+            "top_k_per_candidate_list": report["top_k_per_candidate_list"],
+            "image_count": len(report["images"]),
+            "decode_failure_count": len(report["decode_failures"]),
+            "exact_file_duplicate_group_count": len(report["exact_file_duplicate_groups"]),
+            "exact_pixel_duplicate_group_count": len(report["exact_pixel_duplicate_groups"]),
+            "near_duplicate_candidate_count": report["near_duplicate_candidate_count"],
+            "cross_split_candidate_count": report["cross_split_candidate_count"],
+            "train_test_candidate_count": report["train_test_candidate_count"],
+        }
+    if a.command == "sample-eda":
+        from .eda import sample_eda
+        manifest = sample_eda(a.profile, a.data_root, a.output_dir, a.config)
+        output_dir = Path(a.output_dir).resolve()
+        return {
+            "schema_version": manifest["schema_version"],
+            "protocol_id": manifest["protocol_id"],
+            "manifest_path": str(output_dir / "sample_manifest.json"),
+            "blank_observations_path": str(output_dir / "blank_observations.json"),
+            "blind_key_path": str(output_dir / "blind_key.json"),
+            "config_sha256": manifest["config_sha256"],
+            "profile_sha256": manifest["profile_sha256"],
+            "dataset_hash": manifest["dataset_hash"],
+            "seed": manifest["seed"],
+            "stratum_count": len(manifest["strata"]),
+            "sample_count": len(manifest["samples"]),
+            "phase_counts": {
+                phase: sum(phase in row["selections"] for row in manifest["samples"])
+                for phase in ("calibration", "survey", "discovery")
+            },
+            "blind_sheet_pages": {name: len(ids) for name, ids in manifest["blind_sheet_pages"].items()},
+        }
+    if a.command == "compare-transforms":
+        from .eda import compare_transforms
+        return compare_transforms(a.data_root, a.output_dir, a.ids, a.sizes)
     if a.command in {"train", "evaluate", "predict", "tune", "ensemble", "reproduce"}:
         from . import engine
         if a.command == "train":

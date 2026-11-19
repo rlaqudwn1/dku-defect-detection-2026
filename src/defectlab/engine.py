@@ -1,13 +1,15 @@
-"""Thin, deterministic ResNet18 baseline and provenance-checked prediction tools.
+"""Thin, deterministic image classification baselines and provenance-checked prediction tools.
 
+Supports resnet18, convnext_tiny, swin_t and vit_b_16.
 Checkpoints are trusted local PyTorch files (pickle); never load untrusted files.
 """
 import csv
-import math
-import platform
 import inspect
-import subprocess
+import math
+import os
+import platform
 import random
+import subprocess
 import time
 import uuid
 from datetime import date
@@ -18,23 +20,38 @@ import torch
 from PIL import Image, ImageOps
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
-from torchvision.models import resnet18
+from torchvision.models import convnext_tiny, resnet18, swin_t, vit_b_16
+from torchvision.models.vision_transformer import interpolate_embeddings
 
 from .common import hash_file, hash_json, load_config, load_json, safe_path, write_json
 from .tracking import Tracker
+
+
+_SUPPORTED_MODELS = ('resnet18', 'convnext_tiny', 'swin_t', 'vit_b_16')
 
 
 def _config(path):
     cfg = dict(load_config(path))
     defaults = dict(model='resnet18', image_size=224, batch_size=8, epochs=1,
                     lr=0.001, weight_decay=0.0, seed=42, device='cpu', amp=False,
-                    num_workers=0, tracking={'mode': 'disabled'})
+                    num_workers=0, freeze_backbone=False, pos_weight=None,
+                    tracking={'mode': 'disabled'})
     cfg = {**defaults, **cfg}
-    if cfg['model'] != 'resnet18':
-        raise ValueError('only resnet18 is supported')
+    if cfg['model'] not in _SUPPORTED_MODELS:
+        raise ValueError(f"unsupported model {cfg['model']!r}; choose from {_SUPPORTED_MODELS}")
     for key in ('image_size', 'batch_size', 'epochs'):
         if type(cfg[key]) is not int or cfg[key] < (32 if key == 'image_size' else 1):
             raise ValueError(f'invalid {key}')
+    if cfg['model'] == 'vit_b_16' and cfg['image_size'] % 16 != 0:
+        raise ValueError('vit_b_16 requires image_size divisible by 16')
+    if type(cfg['freeze_backbone']) is not bool:
+        raise ValueError('freeze_backbone must be boolean')
+    if cfg['freeze_backbone'] and not cfg.get('pretrained'):
+        raise ValueError('freeze_backbone requires pretrained weights')
+    if cfg['pos_weight'] is not None and (
+            type(cfg['pos_weight']) not in (int, float)
+            or not math.isfinite(cfg['pos_weight']) or cfg['pos_weight'] <= 0):
+        raise ValueError('pos_weight must be null or a finite positive number')
     if cfg['device'] not in ('cpu', 'cuda') or cfg['num_workers'] != 0:
         raise ValueError('device must be cpu/cuda; deterministic baseline requires num_workers=0')
     if cfg['amp'] and cfg['device'] != 'cuda':
@@ -124,7 +141,10 @@ class _Images(Dataset):
 def _spec(cfg):
     implementation = hash_json({fn.__name__: inspect.getsource(fn)
                                 for fn in (preprocess, _model, _scores, _image_path)})
-    return {'inference_implementation_sha256': implementation,'architecture': 'torchvision.resnet18', 'head': 'linear-1-logit',
+    return {'inference_implementation_sha256': implementation,
+            'architecture': f"torchvision.{cfg['model']}",
+            'freeze_backbone': bool(cfg.get('freeze_backbone', False)),
+            'head': 'linear-1-logit',
             'positive_label': 1, 'probability': 'sigmoid-once',
             'preprocessing': {'image_size': cfg['image_size'], 'resize': 'bilinear-aspect-preserving',
                               'pad': 'center-black', 'color': 'RGB', 'exif_transpose': True,
@@ -132,7 +152,18 @@ def _spec(cfg):
 
 
 def _model(cfg, initialize=False):
-    model = resnet18(weights=None)
+    name = cfg.get('model', 'resnet18')
+    if name == 'resnet18':
+        model = resnet18(weights=None)
+    elif name == 'convnext_tiny':
+        model = convnext_tiny(weights=None)
+    elif name == 'swin_t':
+        model = swin_t(weights=None)
+    elif name == 'vit_b_16':
+        model = vit_b_16(weights=None, image_size=cfg['image_size'])
+    else:
+        raise ValueError(f'unsupported model {name!r}')
+
     if initialize and cfg.get('pretrained'):
         source = cfg['pretrained']
         for field in ('path', 'source_url', 'version', 'publication_date', 'sha256', 'license'):
@@ -142,12 +173,35 @@ def _model(cfg, initialize=False):
             raise ValueError('invalid pretrained source or publication cutoff')
         if hash_file(source['path']) != source['sha256']:
             raise ValueError('pretrained hash mismatch')
-        model.load_state_dict(torch.load(source['path'], map_location='cpu', weights_only=True))
-    model.fc = torch.nn.Linear(model.fc.in_features, 1)
+        state_dict = torch.load(source['path'], map_location='cpu', weights_only=True)
+        if name == 'vit_b_16' and 'encoder.pos_embedding' in state_dict:
+            with torch.no_grad():
+                state_dict = interpolate_embeddings(cfg['image_size'], 16, dict(state_dict))
+        model.load_state_dict(state_dict)
+
+    if name == 'resnet18':
+        head = torch.nn.Linear(model.fc.in_features, 1)
+        model.fc = head
+    elif name == 'convnext_tiny':
+        head = torch.nn.Linear(model.classifier[2].in_features, 1)
+        model.classifier[2] = head
+    elif name == 'swin_t':
+        head = torch.nn.Linear(model.head.in_features, 1)
+        model.head = head
+    else:
+        head = torch.nn.Linear(model.heads.head.in_features, 1)
+        model.heads.head = head
+
+    if cfg.get('freeze_backbone'):
+        for param in model.parameters():
+            param.requires_grad = False
+        for param in head.parameters():
+            param.requires_grad = True
     return model
 
 
 def _seed(seed):
+    os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -191,6 +245,7 @@ def _environment(device=None):
     return {'python': platform.python_version(), 'platform': platform.platform(),
             'torch': torch.__version__, 'torchvision': torchvision.__version__,
             'cuda': torch.version.cuda, 'execution_device': device,
+            'cublas_workspace_config': os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
             'visible_gpu': torch.cuda.get_device_name() if torch.cuda.is_available() else None}
 
 
@@ -223,6 +278,26 @@ def _save_checkpoint(path, state):
     temporary.replace(path)
 
 
+def _step_optimizer(scaler, optimizer, trainable, amp, consecutive_overflows, max_consecutive_overflows=10):
+    scaler.unscale_(optimizer)
+    if not amp:
+        if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in trainable):
+            raise ValueError('nonfinite gradient')
+        scaler.step(optimizer)
+        scaler.update()
+        return False, 0
+    old_scale = scaler.get_scale()
+    scaler.step(optimizer)
+    scaler.update()
+    new_scale = scaler.get_scale()
+    if new_scale < old_scale or new_scale == 0.0:
+        consecutive_overflows += 1
+        if consecutive_overflows >= max_consecutive_overflows:
+            raise ValueError(f'AMP gradient overflow persisted for {consecutive_overflows} consecutive steps')
+        return True, consecutive_overflows
+    return False, 0
+
+
 def train(data_root, split_path, config_path, output_dir, resume=None):
     cfg, split = _config(config_path), _split(split_path)
     _output_guard(data_root, output_dir)
@@ -247,8 +322,13 @@ def train(data_root, split_path, config_path, output_dir, resume=None):
     code_identity = _code_identity()
     _seed(cfg['seed'])
     model = _model(cfg, initialize=resume is None).to(cfg['device'])
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['lr'], weight_decay=cfg['weight_decay'])
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.AdamW(trainable, lr=cfg['lr'], weight_decay=cfg['weight_decay'])
     scaler = torch.amp.GradScaler('cuda', enabled=cfg['amp'])
+    pos_weight = (
+        torch.tensor([cfg['pos_weight']], device=cfg['device'], dtype=torch.float32)
+        if cfg.get('pos_weight') is not None else None
+    )
     run_id, start_epoch, best = uuid.uuid4().hex, 0, -1.
     history = []
     if resume is not None:
@@ -274,28 +354,38 @@ def train(data_root, split_path, config_path, output_dir, resume=None):
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
     training_started = time.monotonic()
+    consecutive_overflows = 0
     try:
         for epoch in range(start_epoch, cfg['epochs']):
             if cfg['device'] == 'cuda':
                 torch.cuda.synchronize()
             started = time.monotonic()
-            model.train()
+            if cfg.get('freeze_backbone'):
+                model.eval()
+                for module in model.modules():
+                    if any(p.requires_grad for p in module.parameters(recurse=False)):
+                        module.train()
+            else:
+                model.train()
             loss_sum = 0.
+            amp_skipped_steps = 0
             for images, labels, _ in training:
                 if cfg.get('max_runtime_seconds') is not None and time.monotonic() - training_started >= cfg['max_runtime_seconds']:
                     raise TimeoutError('training time budget exhausted at batch boundary')
                 optimizer.zero_grad(set_to_none=True)
                 with torch.autocast(device_type=cfg['device'], enabled=cfg['amp']):
                     logits = model(images.to(cfg['device'])).flatten()
-                    loss = torch.nn.functional.binary_cross_entropy_with_logits(logits, labels.to(cfg['device']).float())
+                    loss = torch.nn.functional.binary_cross_entropy_with_logits(
+                        logits, labels.to(cfg['device']).float(), pos_weight=pos_weight
+                    )
                 if not torch.isfinite(loss):
                     raise ValueError('nonfinite loss')
                 scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                if any(p.grad is not None and not torch.isfinite(p.grad).all() for p in model.parameters()):
-                    raise ValueError('nonfinite gradient')
-                scaler.step(optimizer)
-                scaler.update()
+                skipped, consecutive_overflows = _step_optimizer(
+                    scaler, optimizer, trainable, cfg['amp'], consecutive_overflows
+                )
+                if skipped:
+                    amp_skipped_steps += 1
                 loss_sum += loss.item() * len(images)
             if cfg['device'] == 'cuda':
                 torch.cuda.synchronize()
@@ -308,7 +398,8 @@ def train(data_root, split_path, config_path, output_dir, resume=None):
             metrics = {'epoch': epoch + 1, 'loss': loss_sum / len(training.dataset),
                        'val_auroc': score, 'seconds': time.monotonic() - started,
                        'train_seconds': training_finished-started,
-                       'validation_seconds': validation_finished-training_finished}
+                       'validation_seconds': validation_finished-training_finished,
+                       'amp_skipped_steps': amp_skipped_steps}
             history.append(metrics)
             improved = score > best  # earliest epoch wins ties
             best = max(best, score)

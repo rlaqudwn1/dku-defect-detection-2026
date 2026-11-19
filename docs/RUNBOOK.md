@@ -21,10 +21,13 @@ CPU 재현 환경은 `requirements-verified-cpu.txt`다. CPU 전용 wheel은 PyT
 ```bash
 defectlab verify data/raw/open --manifest /path/to/private-manifest.json
 defectlab profile data/raw/open runs/eda
+defectlab audit-duplicates data/raw/open runs/duplicates --split runs/split.json
+defectlab sample-eda runs/eda/profile.json data/raw/open runs/samples --config configs/eda-first-look.json
+defectlab compare-transforms data/raw/open runs/transforms --ids train_00001.jpg --sizes 256 384 512
 defectlab split runs/eda/profile.json runs/split.json --seed 42 --val-fraction 0.2
 ```
 
-manifest가 없으면 `verify data/raw/open`으로 CSV/경로/라벨/파일 해시 기본 검사를 한다. 공급자가 전달한 manifest를 사용해야 다운로드 원본과의 바이트 일치까지 검증할 수 있다. profile은 픽셀 디코드 통계와 표본 contact sheet를 만든다. test 라벨은 null이다. 근접 중복·촬영 관계·제품 의미는 자동 확정하지 않는다. 조사로 확정한 그룹은 `--groups groups.json`의 `{ "groups": {"train_00001.jpg": "capture-1"} }` 형태로 전달할 수 있다.
+manifest가 없으면 `verify data/raw/open`으로 CSV/경로/라벨/파일 해시 기본 검사를 한다. 공급자가 전달한 manifest를 사용해야 다운로드 원본과의 바이트 일치까지 검증할 수 있다. profile은 픽셀 디코드 통계와 표본 contact sheet를 만든다. `audit-duplicates`는 파일·픽셀·dHash 후보 쌍을 점검하며 기존 `duplicate_audit.json` 덮어쓰기를 거부한다. `sample-eda`는 calibration·survey·discovery 블라인드 시트를 생성하고 라벨 매핑은 `blind_key.json`에만 둔다(`configs/eda-first-look.json`의 `calibration_review_per_stratum`, `survey_review_per_stratum`은 후속 재판독 메타데이터다). `compare-transforms`는 엔진과 같은 resize+pad 결과를 생성하며 기존 `transform_comparison.json` 덮어쓰기를 거부한다. test 라벨은 null이다. 근접 중복·촬영 관계·제품 의미는 자동 확정하지 않는다. 조사로 확정한 그룹은 `--groups groups.json`의 `{ "groups": {"train_00001.jpg": "capture-1"} }` 형태로 전달할 수 있다.
 
 ## 학습·고정 가중치 평가·추론
 
@@ -35,9 +38,9 @@ defectlab predict data/raw/open data/raw/open/sample_submission.csv runs/baselin
 defectlab train data/raw/open runs/split.json configs/baseline.toml runs/baseline --resume runs/baseline/last.pt
 ```
 
-baseline은 whole-image ResNet18·1 logit·BCE·단일 sigmoid다. 비율을 보존한 resize/pad와 고정 정규화를 학습 평가/별도 평가/추론에 공유한다. 입력 크기 256은 시작 설정이며 작은 결함 보존 여부는 조사·비교해야 한다. AMP를 요청한 CPU 실행은 거절한다. CPU 설정은 `device="cpu"`, `amp=false`다. 임의 pretrained 자동 다운로드가 없으며 추론은 checkpoint만 읽는다. 자체 생성·신뢰하는 checkpoint만 로드한다.
+baseline은 whole-image `resnet18`·1 logit·BCE·단일 sigmoid다. `model`은 `resnet18`, `convnext_tiny`, `swin_t`, `vit_b_16`(단 `image_size`는 16의 배수)을 지원하며 `freeze_backbone`(사전학습 provenance 필수)과 `pos_weight`(양의 유한 실수 또는 null)를 선택할 수 있다. 비율을 보존한 resize/pad와 고정 정규화를 학습 평가/별도 평가/추론에 공유한다. 입력 크기 256은 시작 설정이며 작은 결함 보존 여부는 조사·비교해야 한다. AMP를 요청한 CPU 실행은 거절한다. CPU 설정은 `device="cpu"`, `amp=false`다. CUDA 결정성 실행 시 `_seed()`가 `CUBLAS_WORKSPACE_CONFIG=:4096:8` 기본값을 지정하며 `environment`에 기록한다. AMP에서는 정상적인 `GradScaler` scale backoff를 허용하고 연속 10회 overflow 시에만 실패 처리한다. 임의 pretrained 자동 다운로드가 없으며 추론은 checkpoint만 읽는다. 자체 생성·신뢰하는 checkpoint만 로드한다.
 
-`last.pt`는 optimizer·난수·epoch 상태를 포함한다. epoch 경계에서만 재개한다. 더 긴 재개는 config의 epochs를 늘린다. 다른 split/config를 같은 run에 덮어쓰지 않는다. `best.pt`는 가장 높은 전체 검증 AUROC의 가중치다. 로컬/다른 환경의 수치 일치는 별도 검사하며 CPU smoke 결과를 대회 성능으로 해석하지 않는다.
+`last.pt`는 optimizer·난수·epoch 상태를 포함한다. epoch 경계에서만 재개한다. 더 긴 재개는 config의 epochs를 늘린다. 다른 split/config를 같은 run에 덮어쓰지 않는다. `best.pt`는 가장 높은 전체 검증 AUROC의 가중치다. 초기 v0.1(다중 모델/동결/pos_weight 확장 이전)에서 만든 checkpoint는 `_model` 해시·`_spec` 키(`freeze_backbone`)·기본 설정 키(`pos_weight`)가 달라 현 버전에서 `resume`/`evaluate`가 거부된다. 로컬/다른 환경의 수치 일치는 별도 검사하며 CPU smoke 결과를 대회 성능으로 해석하지 않는다.
 
 ## 작은 튜닝·앙상블·재현
 

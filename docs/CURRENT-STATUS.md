@@ -2,6 +2,8 @@
 
 ## 2026-11-19 진행 상황
 
+EDA 보조 명령 3개(`audit-duplicates`, `sample-eda`, `compare-transforms` — 라벨 매핑은 `blind_key.json`에만 분리)와 다중 모델·동결·불균형 가중치 지원(`resnet18`, `convnext_tiny`, `swin_t`, `vit_b_16`, `freeze_backbone`, `pos_weight`, `CUBLAS_WORKSPACE_CONFIG=:4096:8`, AMP `GradScaler` overflow 완화) 및 Colab 탐색·`defectlab results`·`RECOVERY` 검증 셀을 추가했다. 초기 v0.1 checkpoint와는 `_model`/`_spec`/기본 설정 키 차이로 호환이 끊긴다. 로컬 환경은 CPU 전용이며 `pytest` 73개(합성)·`ruff`·`check_text`만 통과했고, 실제 대회 데이터 P000 기준선·`256/384/512` 결함 가시성·Colab CUDA/AMP 실측·ImageNet-1K 가중치 대회 규정 적합성은 모두 미확인(`unknown`)이다.
+
 기존 관측 48장 중 지정 16장의 응답 교차표를 만들고 자국 후보 판독이 달랐던 9장의 익명 원본 사본을 다시 확인했다. 위치를 특정할 수 있는 후보 3건, 별도 후보를 식별하지 못한 사례 2건, 판단을 보류한 사례 4건을 기록했다. 이전 메모를 본 진행자의 대조이며 대회 라벨은 가린 상태였다. 이 집계는 선택된 9건의 기술 관측이다.
 
 전체 구도와 작은 단서의 판독 가능성을 따로 기록하는 규칙 초안을 저장했다. 다음 작업은 규칙과 9건 판단의 독립 검토, 이어서 실제 resize+pad 256/384/512에서 단서가 남는지 확인하는 것이다. 촬영 그룹·근접 중복·최종 분할은 미확인이다. 사례별 기록과 장부는 비공개 로컬 근거로 관리한다.
