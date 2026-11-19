@@ -1,0 +1,93 @@
+{
+  "schema_version": 1,
+  "protocol_id": "eda-first-look-v1",
+  "seed": 20261117,
+  "population": "provided train images only",
+  "stratification": [
+    "label",
+    "width",
+    "height"
+  ],
+  "calibration_per_stratum": 3,
+  "survey_per_stratum": 15,
+  "calibration_review_per_stratum": 1,
+  "survey_review_per_stratum": 4,
+  "selection": "Within each stratum, sort original IDs then shuffle with random.Random(seed + canonical stratum string); choose a fixed prefix. Calibration is a nested subset of survey.",
+  "expansion_gate": "Freeze codebook and assess calibration workload/ambiguity before reading additional survey records. Preserve and reread calibration if codebook changes.",
+  "estimation": "Use N_h/n_h survey weights and per-stratum denominators for exploratory image-level frequencies. No unweighted pooled population prevalence or independence claim.",
+  "discovery": {
+    "max_total": 32,
+    "per_metric": 8,
+    "exclude": "entire fixed survey sample",
+    "metrics": [
+      "mean_rgb_low",
+      "mean_rgb_high",
+      "mean_rgb_std_low",
+      "mean_rgb_std_high"
+    ],
+    "use": "Candidate discovery only; not quality judgments or population prevalence."
+  },
+  "blind_first_pass": true,
+  "test_images_included": false,
+  "original_labels_mutable": false,
+  "first_pass_fields": {
+    "product_count": [
+      "one",
+      "multiple",
+      "unclear"
+    ],
+    "composition_notes": "text",
+    "visible_marks": [
+      "seen",
+      "not_seen",
+      "unclear"
+    ],
+    "mark_description": "text; not a defect ground truth",
+    "location_notes": "text; no automatic mask",
+    "small_detail_visibility": [
+      "clear",
+      "limited",
+      "unclear"
+    ],
+    "reflection": [
+      "yes",
+      "no",
+      "unclear"
+    ],
+    "occlusion": [
+      "yes",
+      "no",
+      "unclear"
+    ],
+    "readability": [
+      "adequate",
+      "inadequate",
+      "unclear"
+    ],
+    "confidence": [
+      "low",
+      "medium",
+      "high"
+    ],
+    "evidence_notes": "text",
+    "reader": "text",
+    "read_at": "ISO timestamp",
+    "codebook_version": "text"
+  },
+  "followup_transform_candidates": [
+    256,
+    384,
+    512
+  ],
+  "unknowns": [
+    "physical/capture group independence",
+    "domain expert adjudication",
+    "external visual consultation permission",
+    "final input size",
+    "population interval validity under capture dependence"
+  ],
+  "external_transmission": "not_performed",
+  "remote_prediction": "prohibited",
+  "model": null,
+  "reasoning_effort": null
+}

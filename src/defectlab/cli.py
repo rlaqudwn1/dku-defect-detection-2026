@@ -55,6 +55,9 @@ def parser():
     p.add_argument("record")
     p = commands.add_parser("status")
     p.add_argument("ledger")
+    p = commands.add_parser("workflow")
+    p.add_argument("plan")
+    p.add_argument("ledger")
     p = commands.add_parser("results")
     p.add_argument("output_dir")
     p.add_argument("runs", nargs="+")
@@ -77,6 +80,9 @@ def parser():
 
 
 def dispatch(a):
+    if a.command == "workflow":
+        from .workflow import resume
+        return resume(a.plan, a.ledger)
     if a.command == "select":
         from .selection import select
         return select(a.validation, a.test, a.reproduction, a.output, a.reason)

@@ -81,3 +81,14 @@ defectlab select runs/baseline/validation.json runs/baseline/submission.csv.json
 ```
 
 `reproduction.json`에는 `reproduce`의 JSON 출력을 저장한다. 선택 상태는 로컬 선택이며 대회 업로드·새 GPU 환경 재현 완료와 구분한다.
+
+## Pro 보조 EDA 재개와 오프라인 패킷
+
+구체 단계·기록 계약은 [실행·재개 계획](PRO-ASSISTED-EDA.md)을 따른다.
+
+```bash
+defectlab workflow configs/pro-assisted-eda.json runs/pro-assisted-eda/ledger.json
+python scripts/prepare_pro_packet.py configs/pro-pilot-packet.json runs/pro-assisted-eda/packet-text-001
+```
+
+workflow는 읽기 전용이며 없는 연구 이력을 만들지 않는다. 패킷은 새 runs 디렉터리에만 준비하고 전송·Pro 호출·자동 모델 검증을 하지 않는다. 초기 실행은 기존 Python 환경에서 한다.

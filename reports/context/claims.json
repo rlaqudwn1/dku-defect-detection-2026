@@ -1,0 +1,257 @@
+{
+  "schema": "report-claims-v0.1",
+  "as_of": "2026-11-18",
+  "purpose": "진행 중 원고의 주장과 근거 연결. defectlab context CLI 입력 스키마가 아닌 수동 보고서 장부다.",
+  "status_meaning": "evidence_linked는 파일 연결 상태이며 과학적 타당성·현재 원본 유효성·독립 검토 완료를 인증하지 않는다.",
+  "actual_competition_auroc": null,
+  "selected_primary_method": null,
+  "claims": [
+    {
+      "claim_id": "C001",
+      "statement": "과제는 0=정상, 1=불량이며 이미지당 점수 하나다.",
+      "kind": "task_contract",
+      "sections": [
+        "1"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "README.md",
+          "sha256": "97a74133b47f63e698be8b9bef5a329b48991cc076d0b410fd36c9e448f6332f",
+          "scope": "repository"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "확률 보정은 확인하지 않았다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C002",
+      "statement": "카탈로그는 학습 10821장(정상9621/불량1200), 테스트800장, 학습 크기8종을 기록한다.",
+      "kind": "observation",
+      "sections": [
+        "3"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "runs/real-eda/profile.json",
+          "sha256": "ab85932e34196aa5a1d4d8c33430224b4ad54b76c103dd34ee805ce3bfd3ab8c",
+          "scope": "local_private"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "크기는 제품군 수가 아니다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C003",
+      "statement": "과거 디코드 실패0·바이트 중복0 기록이 있다.",
+      "kind": "historical_observation",
+      "sections": [
+        "3"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "runs/real-eda/profile.json",
+          "sha256": "ab85932e34196aa5a1d4d8c33430224b4ad54b76c103dd34ee805ce3bfd3ab8c",
+          "scope": "local_private"
+        },
+        {
+          "path": "docs/CURRENT-STATUS.md",
+          "sha256": "b77c41ab17e401c071b8771e6c5cafe20a2e1ab992fed35d308f742bd66da321",
+          "scope": "repository"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "픽셀·근접 중복과 현재 원본 전체의 독립성은 미확인이다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C004",
+      "statement": "16층의 고정240장 안에 보정48장을 두고 별도 발견29장을 설계했다.",
+      "kind": "design",
+      "sections": [
+        "3"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "configs/eda-first-look.json",
+          "sha256": "6867feec394839d43926f5e185dc51beb978cca52dcda84ef76e111244f92eeb",
+          "scope": "repository"
+        },
+        {
+          "path": "docs/research/EDA-FIRST-LOOK.md",
+          "sha256": "1aa0c697812a8900808b68954fc233a4e597f0000e350536d619886b3287c236",
+          "scope": "repository"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "실제 추출 영수증은 비공개 근거다. 통계적 충분성을 인증하지 않는다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C005",
+      "statement": "첫48장과 그 일부16장의 기술 응답을 보존했고 자국 후보 차이9건은 조정 중이다. 첫 응답 제품 수는37/11, 자국 후보23/25다.",
+      "kind": "descriptive_observation",
+      "sections": [
+        "3"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "runs/pro-assisted-eda/visual-calibration-001/first-reader-observations-002.json",
+          "sha256": "c451e01c24a5c48c9dd0954905ba902afd9931fac288b6e1d73bd2a365515e84",
+          "scope": "local_private"
+        },
+        {
+          "path": "runs/pro-assisted-eda/visual-calibration-001/second-reader-raw.json",
+          "sha256": "fd5311162cf137010939510b523fb2ce6ac88dddd26c87e02fa646896b715087",
+          "scope": "local_private"
+        },
+        {
+          "path": "runs/pro-assisted-eda/visual-calibration-001/viewing-receipt-002.json",
+          "sha256": "e0a8cbd4d6c7386c582cefd87ea891fcb271ae4804eb05e80a601e0cbd986ae6",
+          "scope": "local_private"
+        },
+        {
+          "path": "runs/pro-assisted-eda/visual-calibration-001/reader-comparison-001.json",
+          "sha256": "afc385e5ab7b163925738d2e122d9d0f1f921b1ddf491f0bece266a0a99ade10",
+          "scope": "local_private"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "원응답·표시 영수증을 연결하며 실제 결함 정답·판독 정확도·모집단 빈도가 아니다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C006",
+      "statement": "구현된 후보는 전체 이미지 ResNet18, 기본 scratch, 무가중 BCEWithLogits, AdamW와 sigmoid 점수다.",
+      "kind": "implementation",
+      "sections": [
+        "1",
+        "2",
+        "4"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "src/defectlab/engine.py",
+          "sha256": "e434ef14f0610c7b6d6b1e9f41e20a51be59b3e8c201aa70ad2574db0286ae2d",
+          "scope": "repository"
+        },
+        {
+          "path": "configs/baseline.toml",
+          "sha256": "2b578d27c4c26c9d65a004d5e58171b01499616b01bd47eab281293a710c9682",
+          "scope": "repository"
+        }
+      ],
+      "source_ids": [
+        "S01",
+        "S02"
+      ],
+      "limitations": [
+        "실제 대회 학습·채택된 주력 모델·최신 성능의 증거가 아니다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C007",
+      "statement": "실물 쌍·촬영 독립성·최종 분할은 미확정이고 mixed-label 그룹에 구현 제약이 있다.",
+      "kind": "limitation",
+      "sections": [
+        "1",
+        "3.1",
+        "4.1",
+        "4.2"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "src/defectlab/data.py",
+          "sha256": "a62f1f18b0f73e877a4ae7d649fd76bf068988939066b810c6f22d41a1f8bb11",
+          "scope": "repository"
+        },
+        {
+          "path": "docs/research/RESEARCH-PLAN-2026-11-18.md",
+          "sha256": "4f46e3b418bebf19e09f1edb698b018b7072dfd974c6fe77eafea316b36a0c44",
+          "scope": "repository"
+        },
+        {
+          "path": "runs/pro-assisted-eda/visual-calibration-001/reader-comparison-001.json",
+          "sha256": "afc385e5ab7b163925738d2e122d9d0f1f921b1ddf491f0bece266a0a99ade10",
+          "scope": "local_private"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "관계 미확인은 관계가 없다는 증명이 아니다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C008",
+      "statement": "현재 확인한 기록에는 실제 대회 성능이 없고 합성 CPU 기능 검사와 EDA 열람은 이를 대체하지 않는다.",
+      "kind": "reported_execution_scope",
+      "sections": [
+        "4.2",
+        "5.1"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "docs/CURRENT-STATUS.md",
+          "sha256": "b77c41ab17e401c071b8771e6c5cafe20a2e1ab992fed35d308f742bd66da321",
+          "scope": "repository"
+        },
+        {
+          "path": "docs/IMPLEMENTATION-VALIDATION.md",
+          "sha256": "89f0d149d7a4b22938f1abc56f013b5aec5d4666c0bf1175207d569dd920c7ae",
+          "scope": "repository"
+        }
+      ],
+      "source_ids": [
+        "S03"
+      ],
+      "limitations": [
+        "상태 문서로 확인한 실행 범위다. 존재 가능한 모든 외부 실행의 부재를 증명하지 않는다."
+      ],
+      "independent_review": null
+    },
+    {
+      "claim_id": "C009",
+      "statement": "후속 비교와 최종 모델 선택은 계획이며 성능·비용은 미측정이다.",
+      "kind": "plan",
+      "sections": [
+        "2",
+        "5.2",
+        "7"
+      ],
+      "status": "evidence_linked",
+      "evidence": [
+        {
+          "path": "docs/research/RESEARCH-PLAN-2026-11-18.md",
+          "sha256": "4f46e3b418bebf19e09f1edb698b018b7072dfd974c6fe77eafea316b36a0c44",
+          "scope": "repository"
+        }
+      ],
+      "source_ids": [],
+      "limitations": [
+        "초록·결론·채택 근거는 실제 결과 확보 후 작성한다."
+      ],
+      "independent_review": null
+    }
+  ]
+}
