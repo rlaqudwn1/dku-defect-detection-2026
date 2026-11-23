@@ -284,21 +284,33 @@ def apply_lna(patch_grid: torch.Tensor, radius: int) -> torch.Tensor:
 
 
 @torch.inference_mode()
+def _to_lna_tokens(raw_patches_np: np.ndarray, radius: int, grid_hw: int, device: str, compute_dtype: torch.dtype) -> torch.Tensor:
+    """Convert raw (B, H*W, C) normalized patches -> on-the-fly LNA (r=1 or r=3) normalized (B, P, C) on GPU."""
+    t = torch.from_numpy(np.array(raw_patches_np, copy=True)).to(device, dtype=compute_dtype)
+    if radius <= 1:
+        return t
+    b, _, c = t.shape
+    fmap = t.float().transpose(1, 2).reshape(b, c, grid_hw, grid_hw)
+    pooled = F.avg_pool2d(fmap, kernel_size=radius, stride=1, padding=radius // 2)
+    flat = pooled.flatten(2).transpose(1, 2)
+    return F.normalize(flat, dim=-1).to(dtype=compute_dtype)
+
+
+@torch.inference_mode()
 def score_split_layer_scale(
     patches_np_or_mm: np.ndarray,
     cids: np.ndarray,
     density: np.ndarray,
     grid_hw: int,
     device: str,
+    radius: int = 1,
     max_bank: int = 64,
     query_batch: int = 16,
     peer_chunk: int = 8,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute Genuine MuSc peer scores (N, n_q, n_k) AND Intra-Image self-mutual scores (N,) on GPU.
 
-    Returns:
-      peer_scores: float32 array of shape (N, len(QUANTILE_INTERVALS), len(TOPK_RATIOS))
-      intra_scores: float32 array of shape (N,)
+    Applies LNA (radius=1 or 3) on-the-fly on GPU so disk/RAM storage is cut in half!
     """
     n, n_patches, _ = patches_np_or_mm.shape
     n_q = len(QUANTILE_INTERVALS)
@@ -317,13 +329,11 @@ def score_split_layer_scale(
     # First compute Intra-Image Self-Mutual Score for all images in fast batches
     for start in range(0, n, query_batch):
         end = min(n, start + query_batch)
-        q_gpu = torch.from_numpy(np.array(patches_np_or_mm[start:end], copy=True)).to(device, dtype=compute_dtype)
-        # (B, P, P) self similarity
+        q_gpu = _to_lna_tokens(patches_np_or_mm[start:end], radius, grid_hw, device, compute_dtype)
         self_sim = torch.bmm(q_gpu, q_gpu.transpose(1, 2))
         self_sim.masked_fill_(near_mask.unsqueeze(0), -2.0)
-        # Use top-5th nearest distant patch (avoids matching a second defective spot!)
-        top5_self = torch.topk(self_sim, k=min(6, n_patches), dim=-1).values[:, :, -1]  # 6th closest distant patch
-        intra_dist = 1.0 - top5_self.float()  # (B, P)
+        top5_self = torch.topk(self_sim, k=min(6, n_patches), dim=-1).values[:, :, -1]
+        intra_dist = 1.0 - top5_self.float()
         intra_scores[start:end] = torch.topk(intra_dist, k=k_intra, dim=-1).values.mean(dim=-1).cpu().numpy()
 
     # Second, per Core Product Cluster: keep 97%-pure Normal Core Bank ON GPU ONCE & score all cluster members!
@@ -331,45 +341,38 @@ def score_split_layer_scale(
     for cid in unique_cids:
         m_idxs = np.where(cids == cid)[0]
         if len(m_idxs) < 4:
-            # Too small for reliable peer quantiles -> fall back to intra score
             peer_scores[m_idxs] = intra_scores[m_idxs, None, None]
             continue
 
-        # Select High-Density Core Reference Bank (up to max_bank=64 purest normal candidates)
         bank_sz = min(max_bank, max(4, int(round(len(m_idxs) * 0.70))))
         bank_idxs = m_idxs[np.argsort(-density[m_idxs])[:bank_sz]]
-        bank_gpu = torch.from_numpy(np.array(patches_np_or_mm[bank_idxs], copy=True)).to(device, dtype=compute_dtype)
+        bank_gpu = _to_lna_tokens(patches_np_or_mm[bank_idxs], radius, grid_hw, device, compute_dtype)
         bank_t = bank_gpu.transpose(1, 2).contiguous()  # (M, D, P)
 
         for start in range(0, len(m_idxs), query_batch):
             q_idxs = m_idxs[start : start + query_batch]
-            q_gpu = torch.from_numpy(np.array(patches_np_or_mm[q_idxs], copy=True)).to(device, dtype=compute_dtype)
+            q_gpu = _to_lna_tokens(patches_np_or_mm[q_idxs], radius, grid_hw, device, compute_dtype)
 
-            # Compute per-peer max patch similarity -> shape (B, M, P) in VRAM-friendly peer chunks
             max_sims_chunks = []
             for p_start in range(0, bank_sz, peer_chunk):
                 p_end = min(bank_sz, p_start + peer_chunk)
                 sub_bt = bank_t[p_start:p_end]  # (mc, D, P)
-                # (B, 1, P, D) @ (1, mc, D, P) -> (B, mc, P, P)
                 sim_4d = torch.matmul(q_gpu.unsqueeze(1), sub_bt.unsqueeze(0))
-                max_sim_chunk = sim_4d.amax(dim=-1)  # (B, mc, P)
-                max_sims_chunks.append(max_sim_chunk)
+                max_sims_chunks.append(sim_4d.amax(dim=-1))
 
             max_sims = torch.cat(max_sims_chunks, dim=1)  # (B, M, P)
             peer_dists = 1.0 - max_sims.float()  # (B, M, P)
 
-            # Mask self-comparison if query image happens to be inside bank_idxs -> set distance to +inf so sorted last
             for bi, img_idx in enumerate(q_idxs):
                 matches = np.where(bank_idxs == img_idx)[0]
                 if len(matches):
                     peer_dists[bi, matches[0], :] = float("inf")
 
-            # Sort distances ascending across the M peers: Genuine MuSc MSM!
             d_sorted, _ = torch.sort(peer_dists, dim=1)  # (B, M, P)
             valid_m = bank_sz - 1 if bank_sz > 4 else bank_sz
 
             for qi, (q_lo, q_hi) in enumerate(QUANTILE_INTERVALS):
-                lo_i = min(valid_m - 1, max(0, int( valid_m * q_lo )))
+                lo_i = min(valid_m - 1, max(0, int(valid_m * q_lo)))
                 hi_i = min(valid_m, max(lo_i + 1, int(round(valid_m * q_hi))))
                 patch_anom_map = d_sorted[:, lo_i:hi_i, :].mean(dim=1)  # (B, P)
                 for ki, k_val in enumerate(k_list):
@@ -378,7 +381,6 @@ def score_split_layer_scale(
 
         del bank_gpu, bank_t
 
-    # Singleton / unassigned items (cid == -1) use Intra-Image patch mutual score
     singleton_m = np.where(cids < 0)[0]
     if len(singleton_m):
         peer_scores[singleton_m] = intra_scores[singleton_m, None, None]
@@ -452,8 +454,16 @@ def process_split(
     batch_size: int,
     device: str,
     use_memmap: bool,
+    ckpt_dir: Path | None = None,
 ) -> dict[str, np.ndarray]:
-    """Extract DINOv2 multi-layer 37x37 patches for ONE split and return compact multi-config score tensors."""
+    """Extract DINOv2 multi-layer 37x37 patches for ONE split with automatic checkpoint resume & 2x-faster LNA."""
+    ckpt_path = (ckpt_dir / f"ckpt_{split_name}.npz") if ckpt_dir is not None else None
+    if ckpt_path is not None and ckpt_path.is_file():
+        loaded = np.load(ckpt_path)
+        if len(loaded["cids"]) == len(ids):
+            print(f"  [{split_name}] Resumed instantly from checkpoint -> {ckpt_path}", flush=True)
+            return {k: loaded[k] for k in ("cls", "cids", "density", "peer_grid", "intra_grid")}
+
     t0 = time.monotonic()
     n = len(ids)
     grid_hw = img_size // 14
@@ -467,20 +477,20 @@ def process_split(
         ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=min(4, os.cpu_count() or 2),
+        num_workers=min(2, os.cpu_count() or 1),
         pin_memory=(device == "cuda"),
     )
 
+    # Store ONLY r=1 raw normalized fp16 patches (4 files instead of 8 -> 2x faster disk I/O & half space!)
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"e09_{split_name}_")) if use_memmap else None
-    storage: dict[tuple[int, int], np.ndarray] = {}
+    storage: dict[int, np.ndarray] = {}
     for li in range(n_layers):
-        for ri in range(n_r):
-            shape = (n, n_patches, feat_dim)
-            if tmp_dir is not None:
-                mm_path = tmp_dir / f"L{li}_R{ri}.fp16"
-                storage[(li, ri)] = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=shape)
-            else:
-                storage[(li, ri)] = np.empty(shape, dtype=np.float16)
+        shape = (n, n_patches, feat_dim)
+        if tmp_dir is not None:
+            mm_path = tmp_dir / f"L{li}.fp16"
+            storage[li] = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=shape)
+        else:
+            storage[li] = np.empty(shape, dtype=np.float16)
 
     cls_last = np.empty((n, feat_dim), dtype=np.float32)
     amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
@@ -492,16 +502,12 @@ def process_split(
             inter = model.get_intermediate_layers(
                 x, n=layer_indices_0based, reshape=True, return_prefix_tokens=True, norm=True
             )
-        # Last extracted layer's CLS token for semantic Core-Cluster discovery
         _, prefix_last = inter[-1]
-        cls_v = F.normalize(prefix_last[:, 0].float(), dim=-1).cpu().numpy()
-        cls_last[b_idxs] = cls_v
+        cls_last[b_idxs] = F.normalize(prefix_last[:, 0].float(), dim=-1).cpu().numpy()
 
         for li, (fmap, _) in enumerate(inter):
-            fmap_fp32 = fmap.float()
-            for ri, rad in enumerate(lna_radii):
-                lna_tok = apply_lna(fmap_fp32, radius=rad)  # (B, P, D) fp16
-                storage[(li, ri)][b_idxs] = lna_tok.cpu().numpy()
+            lna_r1 = apply_lna(fmap.float(), radius=1)  # (B, P, D) fp16
+            storage[li][b_idxs] = lna_r1.cpu().numpy()
 
     if tmp_dir is not None:
         for arr in storage.values():
@@ -513,10 +519,10 @@ def process_split(
     n_single = int((cids < 0).sum())
     print(
         f"  [{split_name}] Extracted {n} imgs ({grid_hw}x{grid_hw}={n_patches} patches x {n_layers} layers) in {t_ext:.1f}s "
-        f"| Core clusters={n_clusters}, singletons={n_single}"
+        f"| Core clusters={n_clusters}, singletons={n_single}",
+        flush=True,
     )
 
-    # Score every (layer, LNA radius) combination on GPU
     t1 = time.monotonic()
     n_q = len(QUANTILE_INTERVALS)
     n_k = len(TOPK_RATIOS)
@@ -524,14 +530,13 @@ def process_split(
     intra_grid = np.zeros((n, n_layers, n_r), dtype=np.float32)
 
     for li in range(n_layers):
-        for ri in range(n_r):
+        for ri, rad in enumerate(lna_radii):
             p_sc, i_sc = score_split_layer_scale(
-                storage[(li, ri)], cids=cids, density=density, grid_hw=grid_hw, device=device
+                storage[li], cids=cids, density=density, grid_hw=grid_hw, device=device, radius=rad
             )
             peer_grid[:, li, ri, :, :] = p_sc
             intra_grid[:, li, ri] = i_sc
 
-    # Clean up temporary storage immediately so next fold starts with clean RAM/disk
     storage.clear()
     if tmp_dir is not None and tmp_dir.exists():
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -539,14 +544,17 @@ def process_split(
     if device == "cuda":
         torch.cuda.empty_cache()
 
-    print(f"  [{split_name}] Genuine MuSc mutual patch scoring finished in {time.monotonic() - t1:.1f}s")
-    return {
+    res = {
         "cls": cls_last,
         "cids": cids,
         "density": density,
-        "peer_grid": peer_grid,    # (N, L, R, Q, K)
-        "intra_grid": intra_grid,  # (N, L, R)
+        "peer_grid": peer_grid,
+        "intra_grid": intra_grid,
     }
+    if ckpt_path is not None:
+        np.savez_compressed(ckpt_path, **res)
+    print(f"  [{split_name}] Genuine MuSc scoring & checkpoint saved in {time.monotonic() - t1:.1f}s", flush=True)
+    return res
 
 
 # ---------------------------------------------------------------------------
@@ -793,8 +801,9 @@ def main() -> None:
     lna_radii = [1, 3]
     print(f"[E09] Probing Multi-Scale Layers={layer_names} (0-idx {layer_idx_0}) x LNA_radii={lna_radii}")
 
-    # 1. Process all 5 Unseen Train Folds strictly independently
+    # 1. Process all 5 Unseen Train Folds strictly independently (with automatic per-fold checkpointing!)
     fold_results: dict[int, dict[str, np.ndarray]] = {}
+    ckpt_dir = None if args.smoke_test else out_dir
     for f in range(5):
         fold_results[f] = process_split(
             split_name=f"train_fold{f}",
@@ -808,6 +817,7 @@ def main() -> None:
             batch_size=args.batch_size,
             device=device,
             use_memmap=use_memmap,
+            ckpt_dir=ckpt_dir,
         )
 
     # 2. Optimize Layer Weights & MuSc Hyperparameters on Train 5-Fold Unseen OOF
@@ -820,7 +830,7 @@ def main() -> None:
     )
 
     # 3. Pure Black-Box Test Inference (1 single pass using Train-selected hyperparameters; ZERO Test inspection!)
-    print("\n=== [3/3] BLACK-BOX TEST INFERENCE (800 IMAGES, ZERO VISUAL ACCESS) ===")
+    print("\n=== [3/3] BLACK-BOX TEST INFERENCE (800 IMAGES, ZERO VISUAL ACCESS) ===", flush=True)
     test_split = process_split(
         split_name="test_blackbox",
         root=root,
@@ -833,6 +843,7 @@ def main() -> None:
         batch_size=args.batch_size,
         device=device,
         use_memmap=use_memmap,
+        ckpt_dir=ckpt_dir,
     )
     sel = opt_summary["selected_hyperparams"]
     test_z = evaluate_config_on_split(
