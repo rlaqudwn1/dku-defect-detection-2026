@@ -250,3 +250,116 @@ def make_split(profile_path, output_path, seed=42, val_fraction=.2, groups_path=
     result["sha256"] = hash_json(result)
     write_json(output_path, result)
     return result
+
+
+def make_folds(profile_path, output_path, n_splits=5, seed=42, groups_path=None):
+    """Make a leakage-safe Stratified Group K-Fold split JSON."""
+    if type(n_splits) is not int or n_splits < 2:
+        raise ValueError("n_splits must be an integer >= 2")
+    catalog = load_json(profile_path)
+    records = catalog["records"]
+    if catalog.get("schema_version") != 1 or dataset_hash(records) != catalog["dataset_hash"]:
+        raise ValueError("profile schema or dataset hash mismatch")
+    if "sha256" in catalog and hash_json({k: v for k, v in catalog.items() if k != "sha256"}) != catalog["sha256"]:
+        raise ValueError("profile hash mismatch")
+    if any(r.get("decode_error") for r in records):
+        raise ValueError("profile contains decode failures")
+    rows = {r["image_path"]: r for r in records if r["role"] == "train"}
+    if any(type(r["label"]) is not int or r["label"] not in (0, 1) for r in rows.values()):
+        raise ValueError("training labels must be 0 or 1")
+
+    parent = {i: i for i in rows}
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(a, b):
+        a, b = find(a), find(b)
+        parent[max(a, b)] = min(a, b)
+
+    exact = defaultdict(list)
+    for i, r in rows.items():
+        exact[r["sha256"]].append(i)
+    for ids in exact.values():
+        for i in ids[1:]:
+            union(ids[0], i)
+    if groups_path is not None:
+        mapping = load_json(groups_path)
+        mapping = mapping.get("groups", mapping)
+        if not isinstance(mapping, dict) or set(mapping) - rows.keys():
+            raise ValueError("groups contain unknown training IDs")
+        supplied = defaultdict(list)
+        for i, group in mapping.items():
+            if not isinstance(group, str) or not group:
+                raise ValueError("group identifiers must be nonempty strings")
+            supplied[group].append(i)
+        for ids in supplied.values():
+            for i in ids[1:]:
+                union(ids[0], i)
+
+    groups = defaultdict(list)
+    for i in sorted(rows):
+        groups[find(i)].append(i)
+
+    # Assign each group (which may contain both normal and defective samples, e.g. a product category)
+    # greedily to the fold that best balances positive and total sample counts while keeping groups indivisible.
+    group_items = []
+    for group, ids in sorted(groups.items()):
+        pos = sum(rows[i]["label"] for i in ids)
+        group_items.append((group, ids, pos, len(ids)))
+    if len(group_items) < n_splits:
+        raise ValueError(f"need at least {n_splits} independent groups, got {len(group_items)}")
+
+    rng = random.Random(seed)
+    rng.shuffle(group_items)
+    # Largest positive/total groups first for balanced stratification across folds.
+    group_items.sort(key=lambda item: (-item[2], -item[3]))
+
+    fold_val_ids = [[] for _ in range(n_splits)]
+    fold_pos_counts = [0] * n_splits
+    fold_tot_counts = [0] * n_splits
+    for _, ids, pos, tot in group_items:
+        # Prefer folds with fewest positives (if group has positives), then fewest total samples.
+        if pos > 0:
+            target_fold = min(range(n_splits), key=lambda f: (fold_pos_counts[f], fold_tot_counts[f], f))
+        else:
+            target_fold = min(range(n_splits), key=lambda f: (fold_tot_counts[f], fold_pos_counts[f], f))
+        fold_val_ids[target_fold].extend(ids)
+        fold_pos_counts[target_fold] += pos
+        fold_tot_counts[target_fold] += tot
+
+    all_train_keys = set(rows.keys())
+    folds = {}
+    for k in range(n_splits):
+        val_ids = sorted(fold_val_ids[k])
+        val_set = set(val_ids)
+        train_ids = sorted(all_train_keys - val_set)
+        if {rows[i]["label"] for i in val_ids} != {0, 1} or {rows[i]["label"] for i in train_ids} != {0, 1}:
+            raise ValueError(f"fold {k} does not contain both classes; reduce n_splits or adjust groups")
+        folds[str(k)] = {
+            "train_ids": train_ids,
+            "val_ids": val_ids,
+            "class_counts": {
+                "train": dict(Counter(str(rows[i]["label"]) for i in train_ids)),
+                "val": dict(Counter(str(rows[i]["label"]) for i in val_ids)),
+            },
+        }
+
+    result = dict(
+        schema_version=1,
+        dataset_hash=catalog["dataset_hash"],
+        seed=seed,
+        n_splits=n_splits,
+        profile_sha256=catalog.get("sha256"),
+        supplied_groups_sha256=hash_file(groups_path) if groups_path is not None else None,
+        folds=folds,
+        labels={i: rows[i]["label"] for i in sorted(rows)},
+        groups={i: find(i) for i in sorted(rows)},
+        method="stratified group k-fold; exact SHA-256 groups union supplied groups",
+    )
+    result["sha256"] = hash_json(result)
+    write_json(output_path, result)
+    return result

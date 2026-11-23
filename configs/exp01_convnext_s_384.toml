@@ -1,0 +1,23 @@
+# Exp 01: Real Pretrained Baseline (ConvNeXt-Small 384px, Cosine LR, Basic Augment, Fast GPU I/O)
+# Requires `pip install timm` on Kaggle/Colab. Published well before 2026-11-15 (Apache-2.0 / MIT).
+model = "timm:convnext_small.fb_in22k_ft_in1k_384"
+pretrained_timm = true
+image_size = 384
+resize_mode = "pad"
+augment = "basic"
+batch_size = 32
+epochs = 12
+lr = 0.0002
+weight_decay = 0.01
+scheduler = "cosine"
+warmup_epochs = 1.0
+grad_clip = 1.0
+label_smoothing = 0.0
+seed = 42
+device = "cuda"
+amp = true
+num_workers = 4
+fast_validate = true
+
+[tracking]
+mode = "disabled"

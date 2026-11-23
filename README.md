@@ -1,108 +1,120 @@
-# DKU 제품 이미지 불량 탐지 연구 도구
+# DKU 제품 이미지 불량 탐지 대회 — 실전 루프 & 컨텍스트 하네스
 
-제품 이미지에서 이미지당 `anomaly_score`(불량 점수) 하나를 만드는 가벼운 Python 연구 도구다. 현재 모델은 sigmoid로 0~1 점수를 출력하며, 확률 보정 여부는 검증하지 않았다. 라벨은 `0=정상`, `1=불량`이며 전체 검증 예측으로 AUROC를 계산한다. 공개 저장소에는 데이터·가중치·예측·인증정보를 넣지 않는다.
+미학습 제품(Unseen-Product)의 외관 이미지에서 `anomaly_score`(`0=정상`, `1=불량`)를 예측하고 **Unseen 5-Fold OOF AUROC**를 극대화하기 위한 경량 ML 실험·컨텍스트 엔지니어링 하네스다.
 
-새 에이전트는 [운영 진입점](docs/OPERATIONS.md)에서 시작해 [현재 상태와 증거](docs/CURRENT-STATUS.md)를 확인한다. 진행자가 도메인 자문·독립 검토·결정·실행·인계를 연결한다. `record`는 실제 전문가 호출을 대신하지 않는다.
+> **핵심 진입점**:
+> - AI 부팅 & 작업 메모리: [AGENTS.md](AGENTS.md) → [STATE.md](STATE.md) → [EXPERIMENTS.md](EXPERIMENTS.md)
+> - 실전 루프 가이드 & 체계화 커리큘럼: [LOOP_PLAN.md](LOOP_PLAN.md) · [CURRICULUM.md](CURRICULUM.md)
+> - 대회 규정 & 데이터 설명: [research/competition-rules.md](research/competition-rules.md) · [research/data-description.md](research/data-description.md)
 
-v0.1은 데이터 검사/픽셀 카탈로그/중복 그룹 분할, ResNet18 학습·epoch 경계 재개·고정 가중치 평가·CSV 추론, 작은 순차 튜닝·확률 앙상블·재현 검사, 로컬/W&B 기록, 관리 장부·보고서 근거 묶음을 제공한다. 실제 대회 GPU 학습·성능 측정·제출은 아직 수행하지 않았다. 무료 Colab GPU와 W&B cloud 연결도 미검증이다.
+---
 
-## 아키텍처 한눈에 보기
+## 시스템 아키텍처 (3-Layer Architecture)
 
-![DefectLab 현재 구현 아키텍처](docs/assets/architecture.svg)
+복잡한 장부·관료주의를 제거하고 **① 컨텍스트 계층 ② ML 실험 루프 엔진 계층 ③ 전략·커리큘럼 계층**의 3단 구조로 설계했다.
 
-이 그림은 현재 소스와 운영 절차를 기준으로 한다. [기반 선택 당시의 설계 비교](docs/ARCHITECTURE.md)와 달리, 원격 연결 성공이나 연구 완료를 뜻하지 않는다.
+```mermaid
+flowchart TD
+    subgraph L1["1. Context Engineering Layer (AI 문맥 유지)"]
+        A["AGENTS.md (불변 규칙)"] --> S["STATE.md (현재 Champion·오답·다음 1액션)"]
+        S --> X["EXPERIMENTS.md (1실험 1줄 기록)"]
+        B["defectlab brief (git·STATE·runs 1초 스냅샷)"] --> S
+    end
 
-전체 구조는 **판단 → 실행 → 근거 확인**으로 이어진다.
+    subgraph L2["2. ML Experiment Loop Engine (src/defectlab/)"]
+        D["data.py + eda.py (profile · audit-duplicates · Unseen 5-Fold)"]
+        E["engine.py (timm/torchvision · Augment · Cosine LR · GPU+AMP · 4x TTA)"]
+        R["errors.py (FP/FN Top-20 오답 시트 자동 생성)"]
+        M["ensemble + reproduce (Rank/Logit 블렌딩 · 수치 재현 검증)"]
+        D --> E --> R
+        E --> M
+    end
 
-1. **진행자가 연구를 운영한다.** 필요한 도메인에 자문하고 별도 독립 검토를 거쳐 다음 실험을 결정한다. 연구 설계·데이터·코드/재현·모델링·평가·연구 운영·보고서의 7개 관점을 사용하며, 매번 전부 호출하지 않는다.
-2. **Python CLI가 명시된 작업을 실행한다.** 원본 검사와 분할, 학습과 재개, 평가와 추론을 작은 명령으로 나눈다. 기본 설치에는 무거운 학습 의존성이 없으며, 필요한 명령에서만 해당 모듈을 불러온다.
-3. **결과와 판단을 별도 근거로 연결한다.** 실행 산출물과 비공개 장부에 해시와 의존성을 남긴다. 과거 실행 완료, 현재 근거 유효성, 영속 저장, 새 세션 복구는 각각 확인한다. 미관측 값은 `null/unknown`이다.
+    subgraph L3["3. Strategy & Learning Layer"]
+        P["LOOP_PLAN.md (One-Change Rule · 5단계 루프)"]
+        C["CURRICULUM.md (RecSys → Zero-Shot Vision 5강 체계)"]
+    end
 
-### 데이터에서 점수까지
-
-`verify → profile → split → train → evaluate / predict`가 기본 경로다. `tune`은 제한된 후보를 순차 실행하며, 필요한 경우 `ensemble → reproduce → select`로 결합·재현·최종 선택 근거를 남긴다. `select`와 CSV 생성은 대회 제출을 수행하지 않는다.
-
-원본은 읽기 전용으로 취급한다. 분할에는 이미지 ID·라벨·그룹·데이터 해시를 기록하고, 학습·평가·추론에서 원본과의 일치를 검사한다. 확정한 촬영/제품 그룹을 추가할 수 있지만, 정확히 같은 이미지의 중복 분리만으로 데이터 독립성이 보장되지는 않는다.
-
-현재 baseline은 이미지 전체를 처리하는 **ResNet18 이진 분류기**다.
-
-```text
-이미지 → EXIF 보정·RGB 변환 → 비율 유지 resize·중앙 pad
-       → 고정 정규화 → ResNet18 → 1 logit → sigmoid → anomaly_score
+    S -->|"가설 1개 실행"| E
+    R -->|"30초 마감 의식: 오답 관찰 → 다음 가설"| S
+    R -->|"1줄 누적"| X
+    L3 -.->|"의사결정 기준 제공"| L1
 ```
 
-학습 손실은 BCE이며 학습 중 검증·별도 평가·테스트 추론이 전처리를 공유한다. 제품 개수와 관계없이 이미지당 점수 하나를 출력한다. 기본은 무작위 초기화이며 사전학습 가중치를 자동 다운로드하지 않는다. `best.pt`는 전체 검증 AUROC가 가장 높은 가중치, `last.pt`는 optimizer·난수·epoch 상태를 포함한 epoch 경계 재개용 checkpoint다.
+### 각 계층의 역할
 
-### 모듈별 책임
+1. **Context Engineering Layer (문맥 드리프트 차단)**
+   - 새 AI 세션은 `AGENTS.md` → `STATE.md` → `EXPERIMENTS.md` **딱 3개 파일(총 100줄 미만)**만 읽고 시작한다.
+   - `defectlab brief`가 `git HEAD`, `STATE.md` 비대화 여부, `EXPERIMENTS.md` 최근 행, `runs/` 내 실제 최고 `run.json`과 `errors.json`을 `torch` 임포트 없이 1초 만에 집계한다.
+   - 매 루프 종료 시 **30초 마감 의식**(`EXPERIMENTS.md` 1줄 추가 + `STATE.md` 덮어쓰기)만 수행하고, 새 요약 문서를 남발하지 않는다.
+2. **ML Experiment Loop Engine (`src/defectlab/`)**
+   - **누수 차단 CV (`data.py`)**: `defectlab folds`로 혼합 라벨 그룹(제품군·해상도)을 지원하는 **Unseen-Product StratifiedGroupKFold** 생성.
+   - **고속 학습·추론 (`engine.py`)**: `torchvision` 4종 + `timm:<model_name>` 지연 임포트, `basic`/`strong` 증강, `pad`/`stretch` 리사이즈, `Cosine + Warmup` 스케줄러, `num_workers >= 0`, GPU+AMP 평가/추론, `--fast` 검증, 4x `--tta`, AUROC 특화 `--method prob|rank|logit` 앙상블 지원.
+   - **오답 주도 EDA (`errors.py`)**: `defectlab errors` 한 줄로 `fp_top20.jpg` / `fn_top20.jpg`를 생성해 다음 가설을 눈으로 도출한다.
+3. **Strategy & Learning Layer**
+   - [LOOP_PLAN.md](LOOP_PLAN.md): Stage A 30분 생존 EDA, Stage B 오답 주도 EDA, 5단계 기계적 실험 루프.
+   - [CURRICULUM.md](CURRICULUM.md): RecSys 엔지니어를 위한 1:1 개념 브릿지(Cold-Start, Item-to-Item CF, User-Bias Calibration)와 5강 핸즈온 커리큘럼.
 
-| 위치 | 책임 | 주요 명령·산출물 |
+---
+
+## 핵심 명령어
+
+```bash
+# 0. AI 세션 부팅 스냅샷 (1초, torch 미임포트)
+defectlab brief
+
+# 1. Stage A: 30분 생존 EDA + Unseen-Product 5-Fold 생성
+defectlab profile data/raw/open runs/eda
+defectlab audit-duplicates data/raw/open runs/duplicates
+defectlab folds runs/eda/profile.json runs/folds_unseen.json \
+  --n-splits 5 --seed 42 --groups runs/eda/product_resolution_groups.json
+
+# 2. Fold-0 빠른 검증 (Pretrained + Cosine LR + Basic Aug + Fast GPU I/O)
+defectlab train data/raw/open runs/folds_unseen.json configs/exp01_convnext_s_384.toml runs/exp01/fold0 --fold 0 --fast
+defectlab evaluate data/raw/open runs/folds_unseen.json runs/exp01/fold0/best.pt runs/exp01/val_fold0.json --fold 0 --fast
+
+# 3. Stage B: 오답 주도 EDA (FP Top-20 / FN Top-20 시트 자동 생성)
+defectlab errors data/raw/open runs/exp01/val_fold0.json runs/exp01/errors --top-k 20
+
+# 4. 추론 (GPU + 4x TTA) 및 AUROC 특화 앙상블 (prob / rank / logit)
+defectlab predict data/raw/open data/raw/open/sample_submission.csv runs/exp01/fold0/best.pt runs/exp01/sub.csv --tta --fast
+defectlab ensemble runs/ens/val.json runs/exp01/val_fold0.json runs/exp02/val_fold0.json --weights 0.5 0.5 --method rank
+```
+
+---
+
+## 모듈 구조
+
+| 위치 | 책임 | 주요 명령 |
 |---|---|---|
-| `src/defectlab/cli.py` | 명령 인자와 모듈 분기 | `defectlab --help` |
-| `src/defectlab/data.py` | 원본 검사·픽셀 조사·그룹 분할 | `verify`, `profile`, `split` |
-| `src/defectlab/eda.py` | 중복 감사·블라인드 표본·변환 비교 | `audit-duplicates`, `sample-eda`, `compare-transforms` |
-| `src/defectlab/engine.py` | 전처리·학습·재개·평가·추론·결합·재현 | `train`, `tune`, `evaluate`, `predict`, `ensemble`, `reproduce` |
-| `src/defectlab/selection.py` | 검증·테스트 출처와 재현 기록을 연결한 선택 | `select` |
-| `src/defectlab/tracking.py` | 로컬 이벤트와 선택적 W&B 기록 | `events.jsonl`, Artifact 영수증 |
-| `src/defectlab/governance.py` | 장부·의존성·결과표·보고서 근거 관리 | `record`, `status`, `results`, `context`, `freshness`, `freeze` |
-| `src/defectlab/workflow.py` | 계획과 현재 장부를 읽어 다음 행동 안내 | `workflow` — 읽기 전용 |
-| `src/defectlab/packets.py` | Pro 자문용 오프라인 패킷 준비 | 명세·원본 사본·해시, 전송 없음 |
-| `src/defectlab/common.py` | 파일/JSON 해시·안전한 경로·설정 입출력 | 공통 기반 |
+| `src/defectlab/cli.py` | 경량 CLI 진입점 (지연 임포트) | `defectlab --help` |
+| `src/defectlab/brief.py` | AI 세션 부팅용 컨텍스트 스냅샷 | `brief` |
+| `src/defectlab/data.py` | 원본 검사·프로파일·혼합 라벨 Stratified Group K-Fold | `verify`, `profile`, `split`, `folds` |
+| `src/defectlab/eda.py` | 중복 감사·해상도 변환 비교 | `audit-duplicates`, `compare-transforms` |
+| `src/defectlab/errors.py` | 오답 주도 EDA (FP/FN Top-K 접촉 시트) | `errors` |
+| `src/defectlab/engine.py` | `torchvision`/`timm` 학습·증강·Cosine LR·TTA·Rank/Logit 앙상블 | `train`, `evaluate`, `predict`, `ensemble`, `reproduce`, `tune` |
+| `src/defectlab/tracking.py` | 로컬 `events.jsonl` 및 선택적 W&B 기록 | `events.jsonl` |
+| `src/defectlab/common.py` | 파일/JSON 해시·안전한 경로·TOML/JSON 설정 | 공통 기반 |
 
-관리 명령은 전문가를 자동 호출하지 않는다. 실제 자문과 독립 검토는 호스트의 에이전트 호출 도구로 수행한 뒤 기록한다. `workflow`도 다음 행동만 안내하며, `freeze`는 근거 묶음을 고정하고 보고서 원고를 생성하지 않는다.
+---
 
-### 실행·저장 위치
-
-| 위치 | 담는 것 | 현재 경계 |
-|---|---|---|
-| Git 저장소 | 코드·공개 설정·문서·테스트·Colab notebook | 원본·가중치·예측·키·비공개 경로 제외 |
-| 로컬 또는 무료 Colab | CLI 실행과 비공개 `runs/` 산출물 | CPU 기능 경로 검증, 실제 Colab GPU 미검증 |
-| 개인 영속 저장소 | 원본·장부·checkpoint·복구 근거 | 복사 후 목적지 해시와 새 세션 복구를 따로 확인 |
-| W&B 선택 연결 | 실험 지표·명시한 모델 Artifact | 기본 `disabled`; `offline` 로컬 검증, cloud 미검증 |
-
-## 설치와 첫 실행
+## 설치 및 개발 검사
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[data,vision,tracking,dev]'
-defectlab --help
-```
+python -m pip install -e '.[data,vision,dev]'
+# Kaggle/Colab에서 timm 백본 사용 시:
+# pip install timm
 
-관리·보고서만 필요하면 `python -m pip install -e .`로 설치한다. PyTorch는 실행 환경에 맞는 CPU/CUDA 빌드를 먼저 설치할 수 있다. [정확한 실행·복구 절차](docs/RUNBOOK.md), [Colab notebook](notebooks/colab.ipynb), [환경 기록](requirements-verified-cpu.txt), [실제 검증 범위](docs/IMPLEMENTATION-VALIDATION.md)를 참고한다.
-
-### 기본 실행 순서
-
-```bash
-defectlab verify data/raw/open --manifest /path/to/private-manifest.json
-defectlab profile data/raw/open runs/eda
-defectlab split runs/eda/profile.json runs/split.json
-defectlab train data/raw/open runs/split.json configs/baseline.toml runs/baseline
-```
-
-`configs/baseline.toml`은 CUDA 출발 설정이다. CPU에서는 `device="cpu"`, `amp=false`로 별도 설정을 만든다. 256 입력의 적절성·근접 중복·촬영 종속성은 연구로 확인해야 한다. exact duplicate 분리가 독립성을 보증하지 않는다.
-
-원본은 `train.csv`, `train/`, `sample_submission.csv`, `test/`를 포함하는 로컬 디렉터리로 전달한다. 원본을 수정하지 않는다. 검증 manifest는 데이터 소유자가 비공개로 전달하며 기본 공개 manifest로 강제하지 않는다.
-
-## 데이터와 실행 규칙
-
-제공 학습 데이터만 학습하고 테스트 정답·외부 원본/공개 라벨을 조회하지 않는다. 원격 모델 추론 API를 사용하지 않는다. 사전학습은 2026-11-15까지 공개된 가중치의 출처·버전·라이선스·해시를 확인한 로컬 파일만 허용한다. 기본은 무작위 초기화다. 대회 제출과 GPU 결제는 자동 수행하지 않는다.
-
-## Pro 보조 EDA와 관련 문서
-
-[지금까지 한 일](docs/research/WORK-SUMMARY-2026-11-18.md)에서 실제 관측과 미완료 작업을 구분한다. [EDA 노트북](notebooks/eda.ipynb)은 기존 카탈로그·익명 판독 기록을 읽어 통계·관측 메모·재판독 차이를 보여 준다. `pip install -e '.[notebook]'` 후 `jupyter lab notebooks/eda.ipynb`로 연다. 비공개 입력 경로는 첫 설정 셀에서 지정하며, 실행 출력·사진을 포함한 사본은 `runs/`에 보관하고 공개 원본은 출력 없이 유지한다.
-
-CV EDA 용어가 익숙하지 않다면 노트북0절과 각 절의 해설, [이진 분류·EDA 읽기 안내](docs/research/BINARY-CLASSIFICATION-EDA-GUIDE.md)를 먼저 읽는다. 제품 유형·실물 촬영 관계·0/1 목표 라벨·제품 수 관측을 구분하고, 불균형 처리와 검증의 조건을 설명한다.
-
-Pro를 최초 분석자로 쓰는 파일럿은 [단계별 실행·재개 계획](docs/PRO-ASSISTED-EDA.md)을 따른다. `workflow`는 다음 행동을 조회하고, 오프라인 패킷 도구는 전송 자료만 준비한다. 실제 Pro 연결·이미지 업로드는 별도 근거가 필요하다.
-
-설계와 연구 책임은 [계획](docs/PLAN.md), [아키텍처](docs/ARCHITECTURE.md), [관리 하네스](docs/MANAGEMENT-HARNESS.md), [보고서 문맥](docs/REPORT-CONTEXT-HARNESS.md)에 보존한다. 이 문서들의 과거 설계 상태 설명은 당시 이력이며 현재 실행 계약은 RUNBOOK과 소스·테스트를 따른다. 미래 연구 하네스의 역할별 LLM 모델·effort는 아직 미정이다.
-
-## 개발 검사
-
-```bash
 python scripts/check_text.py
 .venv/bin/ruff check .
 .venv/bin/pytest
 ```
 
-커밋 전에는 `python scripts/check_text.py --staged`도 실행한다. 실제 검증 기록과 미검증 범위는 [현재 상태](docs/CURRENT-STATUS.md)와 [구현 검증 범위](docs/IMPLEMENTATION-VALIDATION.md)에서 확인한다.
+## 대회 규정 경계
+
+- `data/raw/open` 원본은 읽기 전용이며 수정하지 않는다.
+- 제공 학습 데이터만 학습한다. 테스트 정답·외부 데이터/라벨 조회 및 원격 모델 API 추론을 금지한다.
+- 사전학습 가중치는 **2026-11-15 이전 공개 오픈소스**만 사용하며, 최종 코드 제출 시 버전·출처·라이선스를 명시한다.
+- 데이터·가중치(`.pt`/`.pth`)·예측 CSV·API 키·절대 경로·`runs/`는 Git에 커밋하지 않는다.

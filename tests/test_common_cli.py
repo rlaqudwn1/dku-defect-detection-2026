@@ -26,9 +26,13 @@ def test_path_escape_and_toml(tmp_path):
     assert load_config(tmp_path / 'config.toml') == {'seed': 42}
 
 
-def test_management_cli_no_torch_import(tmp_path):
-    code = "from defectlab.cli import main; import sys; main(['status',sys.argv[1]]); assert 'torch' not in sys.modules"
-    result = subprocess.run([sys.executable, '-c', code, str(tmp_path / 'ledger.json')], capture_output=True, text=True, env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")})
+def test_verify_cli_no_torch_import(tmp_path):
+    code = "from defectlab.cli import main; import sys; main(['verify', sys.argv[1]]); assert 'torch' not in sys.modules"
+    result = subprocess.run(
+        [sys.executable, '-c', code, str(tmp_path / 'missing')],
+        capture_output=True, text=True,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")},
+    )
     assert result.returncode == 0, result.stderr
 
 

@@ -16,6 +16,8 @@ for item in sorted(set(raw.split(b"\0"))):
     if not item or not item.endswith(b".md"):
         continue
     name = item.decode("utf-8")
+    if not args.staged and not (root / name).is_file():
+        continue
     data = (subprocess.check_output(["git", "show", ":" + name], cwd=root)
             if args.staged else (root / name).read_bytes())
     try:

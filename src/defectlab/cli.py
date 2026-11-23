@@ -1,4 +1,4 @@
-"""Explicit local commands; heavy dependencies are imported only when needed."""
+"""Lean ML competition CLI; heavy dependencies are imported only when needed."""
 import argparse
 import json
 from pathlib import Path
@@ -8,108 +8,117 @@ import sys
 def parser():
     root = argparse.ArgumentParser(prog="defectlab")
     commands = root.add_subparsers(dest="command", required=True)
-    p = commands.add_parser("verify")
+
+    p = commands.add_parser("verify", help="Verify dataset files, labels and optional manifest")
     p.add_argument("data_root")
     p.add_argument("--manifest")
-    p = commands.add_parser("profile")
+
+    p = commands.add_parser("profile", help="Decode images and build dataset profile + contact sheet")
     p.add_argument("data_root")
     p.add_argument("output_dir")
+
     p = commands.add_parser("audit-duplicates", help="Audit file, pixel and dHash duplicates")
     p.add_argument("data_root")
     p.add_argument("output_dir")
     p.add_argument("--split", help="Optional split JSON with train_ids and val_ids")
     p.add_argument("--max-hamming", type=int, default=6, help="Maximum dHash distance (default: 6)")
     p.add_argument("--top-k", type=int, default=100, help="Pairs per candidate list (default: 100)")
-    p = commands.add_parser("sample-eda", help="Draw stratified samples and build blind review sheets")
-    p.add_argument("profile")
-    p.add_argument("data_root")
-    p.add_argument("output_dir")
-    p.add_argument("--config", help="Sampling JSON (defaults to the eda-first-look-v1 settings)")
-    p = commands.add_parser("compare-transforms", help="Compare baseline resize/pad with original image detail")
+
+    p = commands.add_parser("compare-transforms", help="Compare resize/pad with original image detail")
     p.add_argument("data_root")
     p.add_argument("output_dir")
     p.add_argument("--ids", nargs="+", required=True, help="Image IDs, a JSON array file, or a text list file")
     p.add_argument("--sizes", nargs="+", type=int, default=[256, 384, 512], help="Sizes (default: 256 384 512)")
-    p = commands.add_parser("split")
+
+    p = commands.add_parser("split", help="Create a leakage-safe stratified group holdout split")
     p.add_argument("profile")
     p.add_argument("output")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-fraction", type=float, default=0.2)
     p.add_argument("--groups")
-    for name in ["train", "evaluate", "predict", "tune"]:
-        p = commands.add_parser(name)
-        p.add_argument("data_root")
-        if name == "train":
-            p.add_argument("split")
-            p.add_argument("config")
-            p.add_argument("output_dir")
-            p.add_argument("--resume")
-        elif name == "evaluate":
-            p.add_argument("split")
-            p.add_argument("checkpoint")
-            p.add_argument("output")
-        elif name == "predict":
-            p.add_argument("template")
-            p.add_argument("checkpoint")
-            p.add_argument("output")
-        else:
-            p.add_argument("split")
-            p.add_argument("plan")
-            p.add_argument("output_dir")
-    p = commands.add_parser("ensemble")
+
+    p = commands.add_parser("folds", help="Create a leakage-safe Stratified Group K-Fold split")
+    p.add_argument("profile")
+    p.add_argument("output")
+    p.add_argument("--n-splits", type=int, default=5)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--groups")
+
+    p = commands.add_parser("train", help="Train a model on a holdout split or a specific CV fold")
+    p.add_argument("data_root")
+    p.add_argument("split")
+    p.add_argument("config")
+    p.add_argument("output_dir")
+    p.add_argument("--resume")
+    p.add_argument("--fold", type=int, default=None, help="Fold index when using folds.json")
+    p.add_argument("--fast", action="store_true", help="Skip full-dataset SHA-256 re-hashing")
+
+    p = commands.add_parser("evaluate", help="Evaluate a checkpoint on validation/fold split (GPU + optional TTA)")
+    p.add_argument("data_root")
+    p.add_argument("split")
+    p.add_argument("checkpoint")
+    p.add_argument("output")
+    p.add_argument("--fold", type=int, default=None, help="Fold index when using folds.json")
+    p.add_argument("--device", choices=["cpu", "cuda"], default=None)
+    p.add_argument("--tta", action="store_true", help="Enable 4x flip Test-Time Augmentation")
+    p.add_argument("--fast", action="store_true", help="Skip full-dataset SHA-256 re-hashing")
+
+    p = commands.add_parser("predict", help="Generate submission CSV on test set (GPU + optional TTA)")
+    p.add_argument("data_root")
+    p.add_argument("template")
+    p.add_argument("checkpoint")
+    p.add_argument("output")
+    p.add_argument("--device", choices=["cpu", "cuda"], default=None)
+    p.add_argument("--tta", action="store_true", help="Enable 4x flip Test-Time Augmentation")
+    p.add_argument("--fast", action="store_true", help="Skip full-dataset SHA-256 re-hashing")
+
+    p = commands.add_parser("errors", help="Error-driven EDA: render FP Top-K and FN Top-K contact sheets")
+    p.add_argument("data_root")
+    p.add_argument("validation")
+    p.add_argument("output_dir")
+    p.add_argument("--top-k", type=int, default=20, help="Number of top FP/FN images (default: 20)")
+
+    p = commands.add_parser("tune", help="Run bounded sequential candidate configs")
+    p.add_argument("data_root")
+    p.add_argument("split")
+    p.add_argument("plan")
+    p.add_argument("output_dir")
+
+    p = commands.add_parser("ensemble", help="Blend validation or test predictions (prob, rank, or logit)")
     p.add_argument("output")
     p.add_argument("members", nargs="+")
     p.add_argument("--weights", type=float, nargs="+", required=True)
+    p.add_argument("--method", choices=["prob", "rank", "logit"], default="prob")
     p.add_argument("--recipe")
     p.add_argument("--frozen-recipe")
-    p = commands.add_parser("reproduce")
+
+    p = commands.add_parser("reproduce", help="Verify numerical equivalence between two prediction files")
     p.add_argument("reference")
     p.add_argument("current")
     p.add_argument("--probability-atol", type=float, required=True)
     p.add_argument("--auroc-atol", type=float, required=True)
-    p = commands.add_parser("record")
-    p.add_argument("ledger")
-    p.add_argument("record")
-    p = commands.add_parser("status")
-    p.add_argument("ledger")
-    p = commands.add_parser("workflow")
-    p.add_argument("plan")
-    p.add_argument("ledger")
-    p = commands.add_parser("results")
-    p.add_argument("output_dir")
-    p.add_argument("runs", nargs="+")
-    p = commands.add_parser("context")
-    p.add_argument("ledger")
-    p.add_argument("brief")
-    p.add_argument("output")
-    for name in ["freshness", "freeze"]:
-        p = commands.add_parser(name)
-        p.add_argument("context")
-        if name == "freeze":
-            p.add_argument("output")
-    p = commands.add_parser("select")
-    p.add_argument("validation")
-    p.add_argument("test")
-    p.add_argument("reproduction")
-    p.add_argument("output")
-    p.add_argument("--reason", required=True)
+
+    p = commands.add_parser("brief", help="Print compact AI session boot context (git, STATE, runs, errors)")
+    p.add_argument("--repo-root", default=".")
+    p.add_argument("--runs-dir", default="runs")
+    p.add_argument("--top-n", type=int, default=5)
+
     return root
 
 
 def dispatch(a):
-    if a.command == "workflow":
-        from .workflow import resume
-        return resume(a.plan, a.ledger)
-    if a.command == "select":
-        from .selection import select
-        return select(a.validation, a.test, a.reproduction, a.output, a.reason)
-    if a.command in {"verify", "profile", "split"}:
+    if a.command == "brief":
+        from .brief import build_brief
+        return build_brief(a.repo_root, a.runs_dir, a.top_n)
+    if a.command in {"verify", "profile", "split", "folds"}:
         from . import data
         if a.command == "verify":
             return data.verify(a.data_root, a.manifest)
         if a.command == "profile":
             return data.profile(a.data_root, a.output_dir)
-        return data.make_split(a.profile, a.output, a.seed, a.val_fraction, a.groups)
+        if a.command == "split":
+            return data.make_split(a.profile, a.output, a.seed, a.val_fraction, a.groups)
+        return data.make_folds(a.profile, a.output, a.n_splits, a.seed, a.groups)
     if a.command == "audit-duplicates":
         from .eda import audit_duplicates
         report = audit_duplicates(a.data_root, a.output_dir, a.split, a.max_hamming, a.top_k)
@@ -130,56 +139,27 @@ def dispatch(a):
             "cross_split_candidate_count": report["cross_split_candidate_count"],
             "train_test_candidate_count": report["train_test_candidate_count"],
         }
-    if a.command == "sample-eda":
-        from .eda import sample_eda
-        manifest = sample_eda(a.profile, a.data_root, a.output_dir, a.config)
-        output_dir = Path(a.output_dir).resolve()
-        return {
-            "schema_version": manifest["schema_version"],
-            "protocol_id": manifest["protocol_id"],
-            "manifest_path": str(output_dir / "sample_manifest.json"),
-            "blank_observations_path": str(output_dir / "blank_observations.json"),
-            "blind_key_path": str(output_dir / "blind_key.json"),
-            "config_sha256": manifest["config_sha256"],
-            "profile_sha256": manifest["profile_sha256"],
-            "dataset_hash": manifest["dataset_hash"],
-            "seed": manifest["seed"],
-            "stratum_count": len(manifest["strata"]),
-            "sample_count": len(manifest["samples"]),
-            "phase_counts": {
-                phase: sum(phase in row["selections"] for row in manifest["samples"])
-                for phase in ("calibration", "survey", "discovery")
-            },
-            "blind_sheet_pages": {name: len(ids) for name, ids in manifest["blind_sheet_pages"].items()},
-        }
     if a.command == "compare-transforms":
         from .eda import compare_transforms
         return compare_transforms(a.data_root, a.output_dir, a.ids, a.sizes)
-    if a.command in {"train", "evaluate", "predict", "tune", "ensemble", "reproduce"}:
-        from . import engine
-        if a.command == "train":
-            return engine.train(a.data_root, a.split, a.config, a.output_dir, a.resume)
-        if a.command == "evaluate":
-            return engine.evaluate(a.data_root, a.split, a.checkpoint, a.output)
-        if a.command == "predict":
-            return engine.predict(a.data_root, a.template, a.checkpoint, a.output)
-        if a.command == "tune":
-            return engine.tune(a.data_root, a.split, a.plan, a.output_dir)
-        if a.command == "ensemble":
-            return engine.ensemble(a.members, a.weights, a.output, a.recipe, a.frozen_recipe)
-        return engine.reproduce(a.reference, a.current, a.probability_atol, a.auroc_atol)
-    from . import governance
-    if a.command == "record":
-        return governance.record(a.ledger, a.record)
-    if a.command == "status":
-        return governance.status(a.ledger)
-    if a.command == "results":
-        return governance.results(a.runs, a.output_dir)
-    if a.command == "context":
-        return governance.context(a.ledger, a.brief, a.output)
-    if a.command == "freshness":
-        return governance.freshness(a.context)
-    return governance.freeze(a.context, a.output)
+    if a.command == "errors":
+        from .errors import analyze_errors
+        return analyze_errors(a.data_root, a.validation, a.output_dir, a.top_k)
+    from . import engine
+    if a.command == "train":
+        return engine.train(a.data_root, a.split, a.config, a.output_dir, a.resume,
+                            fold=a.fold, fast_validate=True if a.fast else None)
+    if a.command == "evaluate":
+        return engine.evaluate(a.data_root, a.split, a.checkpoint, a.output,
+                               device=a.device, tta=a.tta, fold=a.fold, fast_validate=a.fast)
+    if a.command == "predict":
+        return engine.predict(a.data_root, a.template, a.checkpoint, a.output,
+                              device=a.device, tta=a.tta, fast_validate=a.fast)
+    if a.command == "tune":
+        return engine.tune(a.data_root, a.split, a.plan, a.output_dir)
+    if a.command == "ensemble":
+        return engine.ensemble(a.members, a.weights, a.output, a.recipe, a.frozen_recipe, method=a.method)
+    return engine.reproduce(a.reference, a.current, a.probability_atol, a.auroc_atol)
 
 
 def main(argv=None):
