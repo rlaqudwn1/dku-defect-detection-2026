@@ -4,13 +4,9 @@
 
 ## 1. 현재 Champion & 검증 기준
 - **CV Split**: `runs/folds_unseen.json` (Train 10,821장 / 8개 제품군 5-Fold Unseen GroupKFold, `3502/2205/1706/1705/1703`, `labels` 키 포함)
-- **Public LB 최고점**: **`E07` (`0.7167`)** (`E04 0.5593 → E06 0.6941 → E06-clean 0.6968 → E07 0.7167`)
-- **Train 5-Fold Unseen OOF Champion**: **`E12-T2` (`0.9054`, `1_equal_robust_z` / `4_nested_nn_logistic_stack 0.9052`)** — 직전 `E08`(`0.7919`) 대비 **`+0.1135`** 경신!
-  - `M02_vand_clip_l336`: **0.8505** (`F0 0.7542 | F1 0.8808 | F2 0.9088 | F3 0.9320 | F4 0.8851`)
-  - `M05_siglip_so400m_384`: **0.8400** (`F0 0.8474 | F1 0.6540 | F2 0.8272 | F3 0.9110 | F4 0.9746`)
-  - `M03_winclip_l14_laion2b`: **0.8000** (`F0 0.7892 | F1 0.6827 | F2 0.7958 | F3 0.8480 | F4 0.9270`)
-  - `M04_patchmil_convnext_b384`: **0.7761** (`F0 0.6637 | F1 0.7346 | F2 0.8202 | F3 0.8935 | F4 0.8873`)
-  - 4모델 간 Spearman 상관계수 **`0.22 ~ 0.44`** (패러다임 직교성 입증), 검증 완료 제출본 `runs/queue15/sub_queue15_best_ensemble.csv` (801줄) 생성.
+- **Public LB 1위 (Champion)**: **`E11` (`0.875246`)** (`E09 DINOv2-L 518 정품 MuSc + E10 VAND ViT-L-336` — `E07 0.7167` 대비 **`+0.1585`** 폭등!)
+- **Train 5-Fold Unseen OOF Champion**: **`E12-T2` (`0.9054`, Public LB `0.8231`, `MuSc` 미포함)** — `M02(0.8505)+M05(0.8400)+M03(0.8000)+M04(0.7761)`, Spearman `0.22~0.44` 직교성 입증.
+- **결정적 발견**: `E11(0.8752)` > `E12-T2(0.8231)` 차이는 **오직 `37×37` 정품 비지도 `MuSc`(도메인 시프트 0% 미세 패치 비교)**의 유무 → Kaggle에서 실행 중인 `M01`/`M06`(`MuSc`) + `E12-T2` + Wave 2/3 결합이 **`0.90~0.95+` LB 핵심 승부처**!
 
 ## 2. 투트랙 진행 현황 & 컨테이너 최적화 반영 사항
 - **Track 1 (Kaggle 무료 GPU)**: `rlaqudwn1/dku-defect-2026-e09-genuine-musc` (`M01_musc_dinov2_l518`) — 완료 시 `e09_oof_and_test_cache.npz` 회수 대기.
