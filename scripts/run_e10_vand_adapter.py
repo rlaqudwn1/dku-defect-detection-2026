@@ -16,6 +16,7 @@ import argparse
 import csv
 import gc
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -249,6 +250,20 @@ def discover_core_clusters_and_calibrate(
     return z
 
 
+def _fadvise_dontneed(path: Path | str, offset: int = 0, length: int = 0) -> None:
+    """Advise Linux kernel to drop file pages from OS page cache (prevents 8 GiB cgroup RAM thrashing)."""
+    if not hasattr(os, "posix_fadvise"):
+        return
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            os.posix_fadvise(fd, offset, length, os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
 @torch.inference_mode()
 def extract_single_layer_memmap(
     model: nn.Module,
@@ -261,22 +276,30 @@ def extract_single_layer_memmap(
     device: str,
     mm_path: Path,
     capture_cls_final: bool = False,
+    write_order: np.ndarray | None = None,
 ) -> tuple[np.memmap, np.ndarray | None]:
-    """Stream ONE OpenCLIP visual resblock's patch tokens directly to fp16 disk memmap (<13 GB peak disk)."""
+    """Stream ONE OpenCLIP visual resblock's patch tokens directly to fp16 disk memmap (<13 GB peak disk).
+
+    If `write_order` is provided (permutation of 0..n-1), row `k` in memmap stores `ids[write_order[k]]`
+    so contiguous disk chunks are uniformly i.i.d. across folds/groups/labels for sequential chunk training.
+    `cls_arr` is always returned in original `ids` order.
+    """
     n = len(ids)
+    ordered_ids = [ids[int(i)] for i in write_order] if write_order is not None else ids
     captured: dict[str, torch.Tensor] = {}
 
     def _hook(_mod, _inp, outp):
         captured["act"] = outp.detach()
 
     handle = model.visual.transformer.resblocks[layer_idx_0].register_forward_hook(_hook)
-    ds = FullFOVClipDataset(root, role, ids, img_size=img_size)
+    ds = FullFOVClipDataset(root, role, ordered_ids, img_size=img_size)
     # Strict num_workers=0 for 8.0 GiB cgroup RAM (Swap 0B) safety!
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0, pin_memory=(device == "cuda"))
     amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
 
     mm: np.memmap | None = None
     cls_arr: np.ndarray | None = None
+    flushed_up_to = 0
     try:
         for x, batch_idxs in loader:
             b_idxs = batch_idxs.numpy()
@@ -299,12 +322,22 @@ def extract_single_layer_memmap(
                 emb_np = img_emb.cpu().numpy()
                 if cls_arr is None:
                     cls_arr = np.empty((n, emb_np.shape[-1]), dtype=np.float32)
-                cls_arr[b_idxs] = emb_np
+                orig_idxs = write_order[b_idxs] if write_order is not None else b_idxs
+                cls_arr[orig_idxs] = emb_np
+
+            # Periodically flush & drop dirty page cache every ~1024 rows to keep cgroup RAM low
+            cur_end = int(b_idxs[-1]) + 1
+            if cur_end - flushed_up_to >= 1024:
+                mm.flush()
+                row_bytes = mm.shape[1] * mm.shape[2] * 2
+                _fadvise_dontneed(mm_path, flushed_up_to * row_bytes, (cur_end - flushed_up_to) * row_bytes)
+                flushed_up_to = cur_end
     finally:
         handle.remove()
 
     assert mm is not None
     mm.flush()
+    _fadvise_dontneed(mm_path, 0, 0)
     return mm, cls_arr
 
 
@@ -321,69 +354,132 @@ def train_5fold_layer_adapter(
     batch_size: int,
     device: str,
     layer_name: str,
+    train_order: np.ndarray | None = None,
+    chunk_size: int = 512,
 ) -> tuple[np.ndarray, np.ndarray, list[float]]:
-    """Train 5-Fold Unseen PatchTextAdapter for 1..epochs; return FULL (epochs, N_tr) OOF & (epochs, N_te) Test logits."""
-    n_tr, _, patch_dim = tr_mm.shape
+    """Train all 5 Unseen-Fold PatchTextAdapters via GPU-resident fp16 chunks + bf16 autocast.
+
+    Transfers each 512-image fp16 chunk (~600 MB) to GPU ONCE per epoch so all 5 folds slice
+    directly on GPU with zero CPU fancy-indexing, zero fp16->fp32 CPU casts, and minimal PCIe traffic.
+    """
+    n_tr, n_p, patch_dim = tr_mm.shape
     n_te = te_mm.shape[0]
     text_dim = int(text_diff.shape[0])
+    row_bytes = n_p * patch_dim * 2
+    amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+
+    if train_order is None:
+        train_order = np.arange(n_tr, dtype=np.int64)
+    y_ord = y_tr[train_order]
+    fold_ord = fold_arr[train_order]
+    group_ord = group_int_arr[train_order]
 
     oof_by_ep = np.zeros((epochs, n_tr), dtype=np.float32)
     te_by_ep = np.zeros((epochs, n_te), dtype=np.float32)
 
+    adapters: list[PatchTextAdapter] = []
+    opts: list[torch.optim.Optimizer] = []
+    scheds: list[torch.optim.lr_scheduler.LRScheduler] = []
+    pos_ws: list[torch.Tensor] = []
+    fold_rngs: list[np.random.Generator] = []
+
     for fold in range(5):
-        val_m = fold_arr == fold
-        tr_idxs = np.where(~val_m)[0]
-        val_idxs = np.where(val_m)[0]
-
-        y_fold = y_tr[tr_idxs]
-        pos_w = torch.tensor([(y_fold == 0).sum() / max(1, (y_fold == 1).sum())], device=device, dtype=torch.float32)
-
+        y_fold = y_tr[fold_arr != fold]
+        pos_ws.append(torch.tensor([(y_fold == 0).sum() / max(1, (y_fold == 1).sum())], device=device, dtype=torch.float32))
         seed_everything(SEED + fold)
-        adapter = PatchTextAdapter(patch_dim=patch_dim, text_dim=text_dim, top_k_ratio=0.025, dropout=0.30).to(device)
-        opt = torch.optim.AdamW(adapter.parameters(), lr=lr, weight_decay=weight_decay)
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-        rng = np.random.default_rng(SEED + fold)
+        ad = PatchTextAdapter(patch_dim=patch_dim, text_dim=text_dim, top_k_ratio=0.025, dropout=0.30).to(device)
+        op = torch.optim.AdamW(ad.parameters(), lr=lr, weight_decay=weight_decay)
+        sc = torch.optim.lr_scheduler.CosineAnnealingLR(op, T_max=epochs)
+        adapters.append(ad)
+        opts.append(op)
+        scheds.append(sc)
+        fold_rngs.append(np.random.default_rng(SEED + fold))
 
-        for ep in range(epochs):
-            adapter.train()
-            perm = tr_idxs[rng.permutation(len(tr_idxs))]
-            for start in range(0, len(perm), batch_size):
-                sel = perm[start : start + batch_size]
-                bx = torch.from_numpy(np.array(tr_mm[sel], copy=True)).to(device, dtype=torch.float32)
-                by = torch.from_numpy(y_tr[sel]).to(device, dtype=torch.float32)
-                bg = torch.from_numpy(group_int_arr[sel]).to(device, dtype=torch.long)
+    chunks = [(s, min(n_tr, s + chunk_size)) for s in range(0, n_tr, chunk_size)]
+    te_chunks = [(s, min(n_te, s + 400)) for s in range(0, n_te, 400)]
+    ep_rng = np.random.default_rng(SEED)
 
-                opt.zero_grad(set_to_none=True)
-                logits = adapter(bx, text_diff)
-                loss_bce = F.binary_cross_entropy_with_logits(logits, by, pos_weight=pos_w)
-                loss_rank = within_group_ranking_loss(logits, by, bg, margin=0.5)
-                loss = 0.65 * loss_bce + 0.35 * loss_rank
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(adapter.parameters(), 1.0)
-                opt.step()
-            sched.step()
+    for ep in range(epochs):
+        # 1. GPU-resident fp16 chunk training pass (1 transfer feeds all 5 folds on GPU!)
+        for ad in adapters:
+            ad.train()
+        for ci in ep_rng.permutation(len(chunks)):
+            c0, c1 = chunks[int(ci)]
+            chunk_gpu = torch.from_numpy(np.array(tr_mm[c0:c1], copy=True)).to(device)  # fp16 (~600 MB VRAM)
+            _fadvise_dontneed(tr_mm.filename, c0 * row_bytes, (c1 - c0) * row_bytes)
 
-            # Evaluate Val Fold & Test at EVERY epoch (zero Oracle per-fold cherry-picking!)
-            adapter.eval()
-            with torch.inference_mode():
-                val_out = []
-                for start in range(0, len(val_idxs), batch_size):
-                    sel = val_idxs[start : start + batch_size]
-                    bx = torch.from_numpy(np.array(tr_mm[sel], copy=True)).to(device, dtype=torch.float32)
-                    val_out.append(adapter(bx, text_diff).cpu().numpy())
-                oof_by_ep[ep, val_idxs] = np.concatenate(val_out, axis=0)
+            c_y_gpu = torch.from_numpy(y_ord[c0:c1]).to(device, dtype=torch.float32)
+            c_g_gpu = torch.from_numpy(group_ord[c0:c1]).to(device, dtype=torch.long)
+            c_f = fold_ord[c0:c1]
 
-                te_out = []
-                for start in range(0, n_te, batch_size):
-                    bx = torch.from_numpy(np.array(te_mm[start : start + batch_size], copy=True)).to(
-                        device, dtype=torch.float32
-                    )
-                    te_out.append(adapter(bx, text_diff).cpu().numpy())
-                te_by_ep[ep] += np.concatenate(te_out, axis=0) / 5.0
+            for fold in range(5):
+                loc_tr = np.where(c_f != fold)[0]
+                if len(loc_tr) == 0:
+                    continue
+                perm = torch.from_numpy(loc_tr[fold_rngs[fold].permutation(len(loc_tr))]).to(device, dtype=torch.long)
+                ad, opt, pos_w = adapters[fold], opts[fold], pos_ws[fold]
+                for start in range(0, len(perm), batch_size):
+                    sel = perm[start : start + batch_size]
+                    bx = chunk_gpu[sel]
+                    by = c_y_gpu[sel]
+                    bg = c_g_gpu[sel]
 
-        del adapter, opt, sched
-        if device == "cuda":
-            torch.cuda.empty_cache()
+                    opt.zero_grad(set_to_none=True)
+                    with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                        logits = ad(bx, text_diff)
+                    logits_f = logits.float()
+                    loss_bce = F.binary_cross_entropy_with_logits(logits_f, by, pos_weight=pos_w)
+                    loss_rank = within_group_ranking_loss(logits_f, by, bg, margin=0.5)
+                    loss = 0.65 * loss_bce + 0.35 * loss_rank
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(ad.parameters(), 1.0)
+                    opt.step()
+            del chunk_gpu, c_y_gpu, c_g_gpu
+
+        for sc in scheds:
+            sc.step()
+
+        # 2. GPU-resident validation pass (1 transfer evaluates all 5 folds on GPU!)
+        for ad in adapters:
+            ad.eval()
+        with torch.inference_mode():
+            for c0, c1 in chunks:
+                chunk_gpu = torch.from_numpy(np.array(tr_mm[c0:c1], copy=True)).to(device)
+                _fadvise_dontneed(tr_mm.filename, c0 * row_bytes, (c1 - c0) * row_bytes)
+                c_f = fold_ord[c0:c1]
+                for fold in range(5):
+                    loc_val = np.where(c_f == fold)[0]
+                    if len(loc_val) == 0:
+                        continue
+                    loc_t = torch.from_numpy(loc_val).to(device, dtype=torch.long)
+                    ad = adapters[fold]
+                    out_parts = []
+                    for start in range(0, len(loc_t), batch_size):
+                        bx = chunk_gpu[loc_t[start : start + batch_size]]
+                        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                            out_parts.append(ad(bx, text_diff).float().cpu().numpy())
+                    oof_by_ep[ep, train_order[c0 + loc_val]] = np.concatenate(out_parts, axis=0)
+                del chunk_gpu
+
+            # 3. GPU-resident test pass (1 transfer evaluates all 5 folds on GPU!)
+            for t0, t1 in te_chunks:
+                t_gpu = torch.from_numpy(np.array(te_mm[t0:t1], copy=True)).to(device)
+                _fadvise_dontneed(te_mm.filename, t0 * row_bytes, (t1 - t0) * row_bytes)
+                acc = np.zeros(t1 - t0, dtype=np.float32)
+                for fold in range(5):
+                    ad = adapters[fold]
+                    t_parts = []
+                    for start in range(0, t1 - t0, batch_size):
+                        bx = t_gpu[start : start + batch_size]
+                        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                            t_parts.append(ad(bx, text_diff).float().cpu().numpy())
+                    acc += np.concatenate(t_parts, axis=0) / 5.0
+                te_by_ep[ep, t0:t1] = acc
+                del t_gpu
+
+    del adapters, opts, scheds, pos_ws
+    if device == "cuda":
+        torch.cuda.empty_cache()
 
     ep_aucs = [round(float(roc_auc_score(y_tr, oof_by_ep[ep])), 4) for ep in range(epochs)]
     best_ep = int(np.argmax(ep_aucs)) + 1
@@ -488,12 +584,15 @@ def main() -> None:
 
         t_l = time.monotonic()
         tmp_dir = Path(tempfile.mkdtemp(prefix=f"e10_{lname}_"))
+        train_order = np.random.default_rng(SEED + li).permutation(len(train_ids))
+        tr_mm = None
+        te_mm = None
         try:
             need_cls = tr_cls_final is None
             print(f"\n--- [{lname}] Streaming patch tokens to temp disk memmap ({tmp_dir}) ---", flush=True)
             tr_mm, tr_c = extract_single_layer_memmap(
                 clip_model, l0, root, "train", train_ids, args.img_size, args.extract_batch_size,
-                device, tmp_dir / "tr.fp16", capture_cls_final=need_cls,
+                device, tmp_dir / "tr.fp16", capture_cls_final=need_cls, write_order=train_order,
             )
             te_mm, te_c = extract_single_layer_memmap(
                 clip_model, l0, root, "test", test_ids, args.img_size, args.extract_batch_size,
@@ -504,11 +603,12 @@ def main() -> None:
                 if not args.smoke_test:
                     np.savez_compressed(cls_cache_path, tr_cls=tr_cls_final, te_cls=te_cls_final)
 
-            print(f"  [{lname}] Extracted patches {tr_mm.shape} in {time.monotonic() - t_l:.1f}s. Training 5-Fold x {args.epochs}ep...", flush=True)
+            print(f"  [{lname}] Extracted patches {tr_mm.shape} in {time.monotonic() - t_l:.1f}s. Training 5-Fold x {args.epochs}ep (chunk-sequential)...", flush=True)
             oof_ep, te_ep, ep_aucs = train_5fold_layer_adapter(
                 tr_mm, te_mm, y_tr, fold_arr, group_int_arr, text_diff,
                 epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
                 batch_size=args.train_batch_size, device=device, layer_name=lname,
+                train_order=train_order,
             )
             layer_oof_ep[lname] = oof_ep
             layer_te_ep[lname] = te_ep

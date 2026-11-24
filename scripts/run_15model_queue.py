@@ -38,6 +38,7 @@ from run_15model_ensemble import run_ensemble_analysis  # noqa: E402
 from run_e10_vand_adapter import (  # noqa: E402
     ANOMALY_PROMPTS,
     NORMAL_PROMPTS,
+    _fadvise_dontneed,
     discover_core_clusters_and_calibrate,
     load_tables_and_folds,
     seed_everything,
@@ -86,7 +87,7 @@ MODEL_QUEUE: list[QueueModelSpec] = [
     ),
     QueueModelSpec(
         "M05_siglip_so400m_384", 1, "C_ZeroShot_VLM", "winclip",
-        "ViT-SO400M-14-SigLIP-384", "webli", 384, 12, "Apache-2.0 (Google 2023)",
+        "ViT-SO400M-14-SigLIP-384", "webli", 384, 4, "Apache-2.0 (Google 2023)",
         "Sigmoid-loss VLM at 384px; independent calibration geometry from softmax CLIP and stronger fine visual grounding.",
     ),
     # --- WAVE 2: Second Strong Backbone Across All 5 Paradigms ---
@@ -144,12 +145,30 @@ MODEL_QUEUE: list[QueueModelSpec] = [
 ]
 
 
-def _clean_hf_cache_if_low_disk(min_free_gb: float = 14.0) -> None:
+def _dir_size_gb(path: Path) -> float:
+    if not path.exists():
+        return 0.0
+    total = 0
+    for p in path.rglob("*"):
+        if p.is_file() and not p.is_symlink():
+            try:
+                total += p.stat().st_size
+            except OSError:
+                pass
+    return total / (1024.0**3)
+
+
+def _clean_hf_cache_if_low_disk(min_free_gb: float = 14.0, max_cache_gb: float = 3.5) -> None:
+    """Clean HF/torch caches when host free disk < min_free_gb OR cache exceeds max_cache_gb (64GB quota guard)."""
     free_gb = shutil.disk_usage("/").free / (1024.0**3)
-    if free_gb < min_free_gb:
-        hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+    hf_hub = Path.home() / ".cache" / "huggingface" / "hub"
+    hf_gb = _dir_size_gb(hf_hub)
+    if free_gb < min_free_gb or hf_gb > max_cache_gb:
         if hf_hub.exists():
-            print(f"  [Disk Guard] Free disk {free_gb:.1f}GB < {min_free_gb:.1f}GB -> clearing {hf_hub}...", flush=True)
+            print(
+                f"  [Disk Guard] Free={free_gb:.1f}GB, HF cache={hf_gb:.2f}GB (limit {max_cache_gb:.1f}GB) -> clearing {hf_hub}...",
+                flush=True,
+            )
             shutil.rmtree(hf_hub, ignore_errors=True)
             hf_hub.mkdir(parents=True, exist_ok=True)
 
@@ -194,6 +213,14 @@ def run_winclip_model(spec: QueueModelSpec, root: Path, train_ids, y_tr, test_id
     t_a = F.normalize(model.encode_text(tokenizer(ANOMALY_PROMPTS).to(device)).float(), dim=-1).mean(dim=0)
     text_diff = F.normalize(t_a - t_n, dim=-1)
     amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+    # Free text encoder from VRAM after computing text_diff (saves ~1.6 GiB on SigLIP-SO400M for 5.5 GiB GPUs!)
+    if device == "cuda":
+        if hasattr(model, "text"):
+            model.text.to("cpu")
+        elif hasattr(model, "transformer"):
+            model.transformer.to("cpu")
+        model.visual.to(dtype=amp_dtype)
+        torch.cuda.empty_cache()
 
     def _score(enc: nn.Module, role: str, ids: list[str]) -> tuple[np.ndarray, np.ndarray]:
         loader = DataLoader(_WinCLIPDS(root, role, ids, preprocess), batch_size=spec.batch_size, shuffle=False, num_workers=0)
@@ -288,12 +315,19 @@ def run_patch_mil_model(spec: QueueModelSpec, root: Path, train_ids, y_tr, test_
     group_int_arr = np.array([g2int[groups[i]] for i in train_ids], dtype=np.int64)
 
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"q15_{spec.model_id}_"))
+    train_order = np.random.default_rng(SEED).permutation(len(train_ids))
+    tr_mm = None
+    te_mm = None
     try:
         @torch.inference_mode()
-        def _extract(enc: nn.Module, role: str, ids: list[str], mm_path: Path) -> tuple[np.memmap, np.ndarray]:
-            loader = DataLoader(_FullFOVTimmDS(root, role, ids, spec.img_size, mean, std), batch_size=spec.batch_size, shuffle=False, num_workers=0)
+        def _extract(
+            enc: nn.Module, role: str, ids: list[str], mm_path: Path, write_order: np.ndarray | None = None
+        ) -> tuple[np.memmap, np.ndarray]:
+            ordered_ids = [ids[int(i)] for i in write_order] if write_order is not None else ids
+            loader = DataLoader(_FullFOVTimmDS(root, role, ordered_ids, spec.img_size, mean, std), batch_size=spec.batch_size, shuffle=False, num_workers=0)
             mm: np.memmap | None = None
             cls_arr: np.ndarray | None = None
+            flushed_up_to = 0
             for x, b_idxs in loader:
                 idxs = b_idxs.numpy()
                 x = x.to(device, non_blocking=True)
@@ -330,59 +364,119 @@ def run_patch_mil_model(spec: QueueModelSpec, root: Path, train_ids, y_tr, test_
                 c_np = cls_v.cpu().numpy()
                 if cls_arr is None:
                     cls_arr = np.empty((len(ids), c_np.shape[-1]), dtype=np.float32)
-                cls_arr[idxs] = c_np
+                orig_idxs = write_order[idxs] if write_order is not None else idxs
+                cls_arr[orig_idxs] = c_np
+
+                cur_end = int(idxs[-1]) + 1
+                if cur_end - flushed_up_to >= 1024:
+                    mm.flush()
+                    _fadvise_dontneed(mm_path, flushed_up_to * mm.shape[1] * mm.shape[2] * 2, (cur_end - flushed_up_to) * mm.shape[1] * mm.shape[2] * 2)
+                    flushed_up_to = cur_end
             assert mm is not None and cls_arr is not None
             mm.flush()
+            _fadvise_dontneed(mm_path, 0, 0)
             return mm, cls_arr
 
-        tr_mm, tr_cls = _extract(model, "train", train_ids, tmp_dir / "tr.fp16")
+        tr_mm, tr_cls = _extract(model, "train", train_ids, tmp_dir / "tr.fp16", write_order=train_order)
         te_mm, te_cls = _extract(model, "test", test_ids, tmp_dir / "te.fp16")
         del model
         gc.collect()
         if device == "cuda":
             torch.cuda.empty_cache()
 
-        # Train 5-Fold x epochs with STRICT consensus epoch selection (NO per-fold Oracle cherry-picking!)
-        n_tr, _, feat_dim = tr_mm.shape
+        # Train all 5 folds simultaneously via sequential chunk I/O + POSIX_FADV_DONTNEED (8 GiB cgroup RAM safe!)
+        n_tr, n_p, feat_dim = tr_mm.shape
         n_te = te_mm.shape[0]
+        row_bytes = n_p * feat_dim * 2
+        y_ord = y_tr[train_order]
+        fold_ord = fold_arr[train_order]
+        group_ord = group_int_arr[train_order]
+
         oof_ep = np.zeros((epochs, n_tr), dtype=np.float32)
         te_ep = np.zeros((epochs, n_te), dtype=np.float32)
 
+        heads, opts, scheds, pos_ws, fold_rngs = [], [], [], [], []
         for fold in range(5):
-            val_m = fold_arr == fold
-            tr_idxs, val_idxs = np.where(~val_m)[0], np.where(val_m)[0]
-            y_f = y_tr[tr_idxs]
-            pos_w = torch.tensor([(y_f == 0).sum() / max(1, (y_f == 1).sum())], device=device, dtype=torch.float32)
-
+            y_f = y_tr[fold_arr != fold]
+            pos_ws.append(torch.tensor([(y_f == 0).sum() / max(1, (y_f == 1).sum())], device=device, dtype=torch.float32))
             seed_everything(SEED + fold)
-            head = ResidualPatchMILHead(dim=feat_dim, top_k_ratio=0.04).to(device)
-            opt = torch.optim.AdamW(head.parameters(), lr=4e-4, weight_decay=2e-2)
-            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=epochs)
-            rng = np.random.default_rng(SEED + fold)
+            hd = ResidualPatchMILHead(dim=feat_dim, top_k_ratio=0.04).to(device)
+            op = torch.optim.AdamW(hd.parameters(), lr=4e-4, weight_decay=2e-2)
+            sc = torch.optim.lr_scheduler.CosineAnnealingLR(op, T_max=epochs)
+            heads.append(hd)
+            opts.append(op)
+            scheds.append(sc)
+            fold_rngs.append(np.random.default_rng(SEED + fold))
 
-            for ep in range(epochs):
-                head.train()
-                perm = tr_idxs[rng.permutation(len(tr_idxs))]
-                for s in range(0, len(perm), 64):
-                    sel = perm[s : s + 64]
-                    bx = torch.from_numpy(np.array(tr_mm[sel], copy=True)).to(device, dtype=torch.float32)
-                    by = torch.from_numpy(y_tr[sel]).to(device, dtype=torch.float32)
-                    bg = torch.from_numpy(group_int_arr[sel]).to(device, dtype=torch.long)
-                    opt.zero_grad(set_to_none=True)
-                    lg = head(bx)
-                    loss = 0.65 * F.binary_cross_entropy_with_logits(lg, by, pos_weight=pos_w) + 0.35 * within_group_ranking_loss(lg, by, bg)
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(head.parameters(), 1.0)
-                    opt.step()
-                sched.step()
+        chunk_size = 1024
+        chunks = [(s, min(n_tr, s + chunk_size)) for s in range(0, n_tr, chunk_size)]
+        ep_rng = np.random.default_rng(SEED)
 
-                head.eval()
-                with torch.inference_mode():
-                    v_out = [head(torch.from_numpy(np.array(tr_mm[val_idxs[s : s + 64]], copy=True)).to(device, dtype=torch.float32)).cpu().numpy() for s in range(0, len(val_idxs), 64)]
-                    oof_ep[ep, val_idxs] = np.concatenate(v_out, axis=0)
-                    t_out = [head(torch.from_numpy(np.array(te_mm[s : s + 64], copy=True)).to(device, dtype=torch.float32)).cpu().numpy() for s in range(0, n_te, 64)]
-                    te_ep[ep] += np.concatenate(t_out, axis=0) / 5.0
-            del head, opt, sched
+        for ep in range(epochs):
+            for hd in heads:
+                hd.train()
+            for ci in ep_rng.permutation(len(chunks)):
+                c0, c1 = chunks[int(ci)]
+                chunk_gpu = torch.from_numpy(np.array(tr_mm[c0:c1], copy=True)).to(device)  # fp16 (~530 MB VRAM)
+                _fadvise_dontneed(tr_mm.filename, c0 * row_bytes, (c1 - c0) * row_bytes)
+                c_y_gpu = torch.from_numpy(y_ord[c0:c1]).to(device, dtype=torch.float32)
+                c_g_gpu = torch.from_numpy(group_ord[c0:c1]).to(device, dtype=torch.long)
+                c_f = fold_ord[c0:c1]
+                for fold in range(5):
+                    loc_tr = np.where(c_f != fold)[0]
+                    if len(loc_tr) == 0:
+                        continue
+                    perm = torch.from_numpy(loc_tr[fold_rngs[fold].permutation(len(loc_tr))]).to(device, dtype=torch.long)
+                    hd, opt, pos_w = heads[fold], opts[fold], pos_ws[fold]
+                    for s in range(0, len(perm), 64):
+                        sel = perm[s : s + 64]
+                        bx, by, bg = chunk_gpu[sel], c_y_gpu[sel], c_g_gpu[sel]
+                        opt.zero_grad(set_to_none=True)
+                        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                            lg = hd(bx)
+                        lg_f = lg.float()
+                        loss = 0.65 * F.binary_cross_entropy_with_logits(lg_f, by, pos_weight=pos_w) + 0.35 * within_group_ranking_loss(lg_f, by, bg)
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(hd.parameters(), 1.0)
+                        opt.step()
+                del chunk_gpu, c_y_gpu, c_g_gpu
+            for sc in scheds:
+                sc.step()
+
+            for hd in heads:
+                hd.eval()
+            with torch.inference_mode():
+                for c0, c1 in chunks:
+                    chunk_gpu = torch.from_numpy(np.array(tr_mm[c0:c1], copy=True)).to(device)
+                    _fadvise_dontneed(tr_mm.filename, c0 * row_bytes, (c1 - c0) * row_bytes)
+                    c_f = fold_ord[c0:c1]
+                    for fold in range(5):
+                        loc_val = np.where(c_f == fold)[0]
+                        if len(loc_val) == 0:
+                            continue
+                        loc_t = torch.from_numpy(loc_val).to(device, dtype=torch.long)
+                        hd = heads[fold]
+                        v_out = []
+                        for s in range(0, len(loc_t), 64):
+                            bx = chunk_gpu[loc_t[s : s + 64]]
+                            with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                                v_out.append(hd(bx).float().cpu().numpy())
+                        oof_ep[ep, train_order[c0 + loc_val]] = np.concatenate(v_out, axis=0)
+                    del chunk_gpu
+                t_gpu = torch.from_numpy(np.array(te_mm[:], copy=True)).to(device)
+                _fadvise_dontneed(te_mm.filename, 0, 0)
+                acc = np.zeros(n_te, dtype=np.float32)
+                for fold in range(5):
+                    hd = heads[fold]
+                    t_out = []
+                    for s in range(0, n_te, 64):
+                        bx = t_gpu[s : s + 64]
+                        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                            t_out.append(hd(bx).float().cpu().numpy())
+                    acc += np.concatenate(t_out, axis=0) / 5.0
+                te_ep[ep] = acc
+                del t_gpu
+        del heads, opts, scheds, pos_ws
 
         cal_ep = np.zeros_like(oof_ep)
         cal_aucs = []
