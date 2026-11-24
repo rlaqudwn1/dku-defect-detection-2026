@@ -18,10 +18,9 @@
 - `37×37` 패치를 `12×12`로 축소 / 동료 패치 비교 시 `top-1 max` / Min-Max 후 `logit` 재변환
 - 5-Fold 전체 Unseen OOF 미검증 모델을 제출에 포함하기 / `8.0 GiB` 컨테이너에서 대형 텐서 RAM 통째 적재
 
-## 4. 지금 당장 할 다음 행동 (Blackwell 서버 단일 주도 루프)
-- **Step 1**: 진행 중인 `E10` (`VAND/AnomalyCLIP` 멀티-레이어 패치-텍스트 어댑터) 완료 확인 → Layer/Epoch(1~15)/Robust Z-Score 5-Fold OOF 확정 및 `defectlab errors` 분석.
-- **Step 2**: 체크포인트+2배 고속화 완료된 `scripts/colab_e09_genuine_musc.py` (`DINOv2-Large 518px`, `37×37` 원본 패치 정품 MuSc)를 `--batch-size 8`로 Blackwell 서버에서 실행해 5-Fold OOF + Test 캐시 확보.
-- **Step 3**: `E09` (비지도 고해상도 DINOv2-L 패치 MuSc) + `E10` (지도 CLIP 패치-텍스트 어댑터)를 Train 5-Fold Unseen OOF 기준으로 Rank/Logit-Z 앙상블 검증 → 최고점 경신 시 최종 제출 파일 확정.
+## 4. 지금 당장 할 다음 행동 (15개 모델 Wave-Ordered Queue + 5대 앙상블 자동 루프)
+- **정식 Queue 파이프라인 커밋 완료**: `scripts/run_15model_queue.py` (Wave 1~3, 5대 패러다임 × 3종 백본 = 15모델, `--max-minutes`/`--auto-clean-cache`/원자적 체크포인트 이어달리기) + `scripts/run_15model_ensemble.py` (Nested 5-Fold 5대 앙상블 비교 + 보고서용 `queue_report_tables.md` 자동 생성).
+- **실행 순서**: 서버에서 `Wave 1 (M01~M05)`부터 실행(`--wave 1 --auto-clean-cache --max-minutes 180`) → 5대 패러다임 대표 5종 확보 후 `Wave 2`·`Wave 3` 확장. (구출된 `runs/submissions/sub_e11_ensemble_e09_e10.csv`도 보존 완료, Kaggle 무료 GPU에서도 `E09` v2 병렬 가동 중.)
 
 ## 5. 새 연구원 세션 시작 프롬프트 (복사해서 붙여넣기)
 ```text
