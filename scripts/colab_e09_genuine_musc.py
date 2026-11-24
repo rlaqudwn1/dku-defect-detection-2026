@@ -481,63 +481,109 @@ def process_split(
         pin_memory=(device == "cuda"),
     )
 
-    # Store ONLY r=1 raw normalized fp16 patches (4 files instead of 8 -> 2x faster disk I/O & half space!)
+    # Auto-enable 1-layer-at-a-time streaming if free disk < 55 GB (caps peak disk at 9.8 GB instead of 39 GB!)
+    free_disk_gb = shutil.disk_usage("/tmp").free / (1024.0**3)
+    layer_by_layer = use_memmap and (free_disk_gb < 55.0)
     tmp_dir = Path(tempfile.mkdtemp(prefix=f"e09_{split_name}_")) if use_memmap else None
-    storage: dict[int, np.ndarray] = {}
-    for li in range(n_layers):
-        shape = (n, n_patches, feat_dim)
-        if tmp_dir is not None:
-            mm_path = tmp_dir / f"L{li}.fp16"
-            storage[li] = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=shape)
-        else:
-            storage[li] = np.empty(shape, dtype=np.float16)
-
-    cls_last = np.empty((n, feat_dim), dtype=np.float32)
     amp_dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
 
-    for x, batch_idxs in loader:
-        b_idxs = batch_idxs.numpy()
-        x = x.to(device, non_blocking=True)
-        with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
-            inter = model.get_intermediate_layers(
-                x, n=layer_indices_0based, reshape=True, return_prefix_tokens=True, norm=True
-            )
-        _, prefix_last = inter[-1]
-        cls_last[b_idxs] = F.normalize(prefix_last[:, 0].float(), dim=-1).cpu().numpy()
-
-        for li, (fmap, _) in enumerate(inter):
-            lna_r1 = apply_lna(fmap.float(), radius=1)  # (B, P, D) fp16
-            storage[li][b_idxs] = lna_r1.cpu().numpy()
-
-    if tmp_dir is not None:
-        for arr in storage.values():
-            arr.flush()
-
-    t_ext = time.monotonic() - t0
-    cids, density = discover_core_product_clusters(cls_last)
-    n_clusters = len(set(int(c) for c in cids if c >= 0))
-    n_single = int((cids < 0).sum())
-    print(
-        f"  [{split_name}] Extracted {n} imgs ({grid_hw}x{grid_hw}={n_patches} patches x {n_layers} layers) in {t_ext:.1f}s "
-        f"| Core clusters={n_clusters}, singletons={n_single}",
-        flush=True,
-    )
-
-    t1 = time.monotonic()
     n_q = len(QUANTILE_INTERVALS)
     n_k = len(TOPK_RATIOS)
     peer_grid = np.zeros((n, n_layers, n_r, n_q, n_k), dtype=np.float32)
     intra_grid = np.zeros((n, n_layers, n_r), dtype=np.float32)
+    cls_last = np.empty((n, feat_dim), dtype=np.float32)
 
-    for li in range(n_layers):
-        for ri, rad in enumerate(lna_radii):
-            p_sc, i_sc = score_split_layer_scale(
-                storage[li], cids=cids, density=density, grid_hw=grid_hw, device=device, radius=rad
-            )
-            peer_grid[:, li, ri, :, :] = p_sc
-            intra_grid[:, li, ri] = i_sc
+    if layer_by_layer:
+        # Low-disk mode (64 GB container safe): extract & score 1 layer at a time (<= 9.8 GB peak disk!)
+        # First pass extracts last layer + CLS so Core Clusters are identical across all layers
+        order = [n_layers - 1] + list(range(n_layers - 1))
+        cids: np.ndarray | None = None
+        density: np.ndarray | None = None
+        for li in order:
+            l0 = layer_indices_0based[li]
+            assert tmp_dir is not None
+            mm_path = tmp_dir / f"L{li}.fp16"
+            mm = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=(n, n_patches, feat_dim))
+            for x, batch_idxs in loader:
+                b_idxs = batch_idxs.numpy()
+                x = x.to(device, non_blocking=True)
+                with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                    inter = model.get_intermediate_layers(
+                        x, n=[l0], reshape=True, return_prefix_tokens=(li == n_layers - 1), norm=True
+                    )
+                if li == n_layers - 1:
+                    fmap, prefix_last = inter[0]
+                    cls_last[b_idxs] = F.normalize(prefix_last[:, 0].float(), dim=-1).cpu().numpy()
+                else:
+                    fmap = inter[0]
+                mm[b_idxs] = apply_lna(fmap.float(), radius=1).cpu().numpy()
+            mm.flush()
+            if cids is None or density is None:
+                cids, density = discover_core_product_clusters(cls_last)
+                n_clusters = len(set(int(c) for c in cids if c >= 0))
+                print(
+                    f"  [{split_name}] Low-disk mode ({free_disk_gb:.1f}GB free) | Core clusters={n_clusters}, singletons={int((cids < 0).sum())}",
+                    flush=True,
+                )
+            for ri, rad in enumerate(lna_radii):
+                p_sc, i_sc = score_split_layer_scale(mm, cids=cids, density=density, grid_hw=grid_hw, device=device, radius=rad)
+                peer_grid[:, li, ri, :, :] = p_sc
+                intra_grid[:, li, ri] = i_sc
+            del mm
+            mm_path.unlink(missing_ok=True)
+            gc.collect()
+            if device == "cuda":
+                torch.cuda.empty_cache()
+        assert cids is not None and density is not None
+        t1 = t0
+    else:
+        # Fast single-pass mode (Kaggle / Colab): store 4 raw fp16 layers once, then score all (layer, radius)
+        storage: dict[int, np.ndarray] = {}
+        for li in range(n_layers):
+            shape = (n, n_patches, feat_dim)
+            if tmp_dir is not None:
+                mm_path = tmp_dir / f"L{li}.fp16"
+                storage[li] = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=shape)
+            else:
+                storage[li] = np.empty(shape, dtype=np.float16)
 
-    storage.clear()
+        for x, batch_idxs in loader:
+            b_idxs = batch_idxs.numpy()
+            x = x.to(device, non_blocking=True)
+            with torch.autocast(device_type=device, dtype=amp_dtype, enabled=(device == "cuda")):
+                inter = model.get_intermediate_layers(
+                    x, n=layer_indices_0based, reshape=True, return_prefix_tokens=True, norm=True
+                )
+            _, prefix_last = inter[-1]
+            cls_last[b_idxs] = F.normalize(prefix_last[:, 0].float(), dim=-1).cpu().numpy()
+
+            for li, (fmap, _) in enumerate(inter):
+                storage[li][b_idxs] = apply_lna(fmap.float(), radius=1).cpu().numpy()
+
+        if tmp_dir is not None:
+            for arr in storage.values():
+                arr.flush()
+
+        t_ext = time.monotonic() - t0
+        cids, density = discover_core_product_clusters(cls_last)
+        n_clusters = len(set(int(c) for c in cids if c >= 0))
+        n_single = int((cids < 0).sum())
+        print(
+            f"  [{split_name}] Extracted {n} imgs ({grid_hw}x{grid_hw}={n_patches} patches x {n_layers} layers) in {t_ext:.1f}s "
+            f"| Core clusters={n_clusters}, singletons={n_single}",
+            flush=True,
+        )
+
+        t1 = time.monotonic()
+        for li in range(n_layers):
+            for ri, rad in enumerate(lna_radii):
+                p_sc, i_sc = score_split_layer_scale(
+                    storage[li], cids=cids, density=density, grid_hw=grid_hw, device=device, radius=rad
+                )
+                peer_grid[:, li, ri, :, :] = p_sc
+                intra_grid[:, li, ri] = i_sc
+        storage.clear()
+
     if tmp_dir is not None and tmp_dir.exists():
         shutil.rmtree(tmp_dir, ignore_errors=True)
     gc.collect()
