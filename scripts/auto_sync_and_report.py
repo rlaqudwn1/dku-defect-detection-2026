@@ -39,15 +39,17 @@ def main() -> None:
 
     py = sys.executable
 
-    # 1. Google Drive Sync (graceful skip if rclone/gdrive not configured on this host)
-    if not args.skip_sync and shutil.which("rclone"):
-        remotes = subprocess.run(["rclone", "listremotes"], capture_output=True, text=True, check=False).stdout
-        if "gdrive:" in remotes or os.environ.get("RCLONE_REMOTE"):
-            run_step(["bash", "scripts/sync_artifacts.sh", "push"], "Google Drive rclone push", required=False)
+    # 1. Zero-OAuth W&B Artifact Sync (works cleanly on headless Blackwell server with WANDB_API_KEY!)
+    if not args.skip_sync:
+        has_wb = bool(os.environ.get("WANDB_API_KEY") or (Path.home() / ".netrc").exists())
+        if has_wb:
+            run_step([py, "scripts/sync_wandb_artifacts.py", "push"], "W&B Artifact push (Zero-OAuth sync)", required=False)
+        elif shutil.which("rclone"):
+            remotes = subprocess.run(["rclone", "listremotes"], capture_output=True, text=True, check=False).stdout
+            if "gdrive:" in remotes or os.environ.get("RCLONE_REMOTE"):
+                run_step(["bash", "scripts/sync_artifacts.sh", "push"], "Google Drive rclone push", required=False)
         else:
-            print("[AUTO-HUB] rclone installed but no gdrive: remote found; skipping cloud push.", flush=True)
-    elif not args.skip_sync:
-        print("[AUTO-HUB] rclone not found; skipping cloud push.", flush=True)
+            print("[AUTO-HUB] No W&B credentials or rclone configured; keeping caches locally.", flush=True)
 
     # 2. Recompute Nested 5-Fold Ensemble & Markdown Report Tables
     run_step([py, "scripts/run_15model_ensemble.py"], "Nested 5-Fold Ensemble & Report Tables", required=True)
