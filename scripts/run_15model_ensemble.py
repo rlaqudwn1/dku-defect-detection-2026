@@ -67,26 +67,32 @@ def caruana_greedy_weights(Z_tr: np.ndarray, y_tr: np.ndarray, steps: int = 20) 
     return counts / max(1.0, counts.sum())
 
 
-def nonnegative_logistic_weights(Z_tr: np.ndarray, y_tr: np.ndarray, l2_reg: float = 2.0) -> np.ndarray:
+def nonnegative_logistic_weights(
+    Z_tr: np.ndarray,
+    y_tr: np.ndarray,
+    l2_reg: float = 2.0,
+    shrink_to_uniform: bool = True,
+) -> np.ndarray:
     """Fit non-negative L2-regularized logistic stacking weights strictly on 4 training folds."""
     m = Z_tr.shape[0]
     X = Z_tr.T  # (N, M)
     y = y_tr.astype(np.float64)
     pos_w = (y == 0).sum() / max(1.0, (y == 1).sum())
     sample_w = np.where(y == 1, pos_w, 1.0)
+    target = (1.0 / m) if shrink_to_uniform else 0.0
 
     def _loss(params: np.ndarray) -> float:
         w = params[:m]
         b = params[m]
         logits = np.clip(X @ w + b, -20.0, 20.0)
-        # Weighted binary cross-entropy + L2 toward uniform weights
+        # Weighted binary cross-entropy + L2 regularization
         bce = np.mean(sample_w * (np.logaddexp(0.0, logits) - y * logits))
-        reg = l2_reg * np.sum((w - (1.0 / m)) ** 2)
+        reg = l2_reg * np.sum((w - target) ** 2)
         return float(bce + reg)
 
     init = np.concatenate([np.full(m, 1.0 / m), [0.0]])
     bounds = [(0.0, 5.0)] * m + [(-5.0, 5.0)]
-    res = minimize(_loss, init, method="L-BFGS-B", bounds=bounds, options={"maxiter": 150})
+    res = minimize(_loss, init, method="L-BFGS-B", bounds=bounds, options={"maxiter": 200})
     w = np.maximum(0.0, res.x[:m])
     return w / (w.sum() + 1e-12)
 
@@ -307,11 +313,103 @@ def run_ensemble_analysis(
     }
     method_test_preds["5_power_rank_top_tail"] = (w_m5_full @ (R_te ** best_p_full), True)
 
+    # Track per-method nested OOF arrays so we can export the winning OOF for `defectlab errors`
+    method_oof_preds: dict[str, np.ndarray] = {
+        "1_equal_robust_z": m1_oof,
+        "2_equal_rank_avg": m2_oof,
+        "3_caruana_greedy_rank": m3_nested,
+        "4_nested_nn_logistic_stack": m4_nested,
+        "5_power_rank_top_tail": m5_nested,
+    }
+
+    # Method 6: Paradigm-Hierarchical 5-Tower Nested Stack (zero-leakage structural grouping)
+    # Prevents 13 supervised/VLM models from diluting the 2 unsupervised MuSc models (0% domain shift).
+    # Excludes collapsed/E2E-overfit models (M15 E2E 0.6781, M12 Fold-1 0.4837, M10 dominated OpenAI ZS).
+    idx_by_prefix = {mid[:3]: i for i, mid in enumerate(model_ids)}
+    tower_spec = {
+        "A_MuSc": [idx_by_prefix[k] for k in ("M01", "M06") if k in idx_by_prefix],
+        "B_VAND": [idx_by_prefix[k] for k in ("M02", "M07", "M11") if k in idx_by_prefix],
+        "C_ZeroShot": [idx_by_prefix[k] for k in ("M03", "M05") if k in idx_by_prefix],
+        "D_PatchMIL_ViT": [idx_by_prefix[k] for k in ("M08", "M13") if k in idx_by_prefix],
+        "E_CNN_Hier": [idx_by_prefix[k] for k in ("M04", "M14", "M09") if k in idx_by_prefix],
+    }
+    active_towers = {k: v for k, v in tower_spec.items() if v}
+    if len(active_towers) >= 3:
+        t_names = list(active_towers.keys())
+        T_oof_list, T_te_list = [], []
+        for idxs in active_towers.values():
+            t_tr = Z_oof[idxs].mean(axis=0)
+            t_tr = (t_tr - np.median(t_tr)) / (np.percentile(t_tr, 75) - np.percentile(t_tr, 25) + 1e-6)
+            t_te = Z_te[idxs].mean(axis=0)
+            t_te = (t_te - np.median(t_te)) / (np.percentile(t_te, 75) - np.percentile(t_te, 25) + 1e-6)
+            T_oof_list.append(t_tr)
+            T_te_list.append(t_te)
+        T_oof = np.stack(T_oof_list, axis=0)
+        T_te = np.stack(T_te_list, axis=0)
+
+        m6_nested = np.zeros(len(y_tr), dtype=np.float64)
+        for held_f in range(5):
+            tr_m = fold_arr != held_f
+            val_m = ~tr_m
+            w_f = nonnegative_logistic_weights(T_oof[:, tr_m], y_tr[tr_m], l2_reg=0.2, shrink_to_uniform=False)
+            m6_nested[val_m] = w_f @ T_oof[:, val_m]
+        w_m6_full = nonnegative_logistic_weights(T_oof, y_tr, l2_reg=0.2, shrink_to_uniform=False)
+        methods_report["6_paradigm_5tower_nested_stack"] = {
+            "nested_5fold_oof": round(float(roc_auc_score(y_tr, m6_nested)), 4),
+            "weights": {tn: round(float(w), 4) for tn, w in zip(t_names, w_m6_full)},
+            "why": "Paradigm-hierarchical 5-tower stack (12m, excl M10/M12/M15); preserves 30% unsupervised MuSc weight without uniform-shrinkage dilution.",
+        }
+        method_test_preds["6_paradigm_5tower_nested_stack"] = (w_m6_full @ T_te, False)
+        method_oof_preds["6_paradigm_5tower_nested_stack"] = m6_nested
+
+    # Method 7: Pruned Non-Redundant Elite-9 Nested Stack (1-2 strongest non-redundant models per family)
+    elite9_keys = ("M01", "M06", "M07", "M05", "M03", "M08", "M14", "M04", "M09")
+    elite9_idxs = [idx_by_prefix[k] for k in elite9_keys if k in idx_by_prefix]
+    if len(elite9_idxs) == len(elite9_keys):
+        Z_e9_oof = Z_oof[elite9_idxs]
+        Z_e9_te = Z_te[elite9_idxs]
+        m7_nested = np.zeros(len(y_tr), dtype=np.float64)
+        for held_f in range(5):
+            tr_m = fold_arr != held_f
+            val_m = ~tr_m
+            w_f = nonnegative_logistic_weights(Z_e9_oof[:, tr_m], y_tr[tr_m], l2_reg=1.0, shrink_to_uniform=False)
+            m7_nested[val_m] = w_f @ Z_e9_oof[:, val_m]
+        w_m7_full = nonnegative_logistic_weights(Z_e9_oof, y_tr, l2_reg=1.0, shrink_to_uniform=False)
+        methods_report["7_pruned_elite9_nested_stack"] = {
+            "nested_5fold_oof": round(float(roc_auc_score(y_tr, m7_nested)), 4),
+            "weights": {model_ids[i]: round(float(w), 4) for i, w in zip(elite9_idxs, w_m7_full)},
+            "why": "Pruned non-redundant Elite-9 stack (L2-to-zero=1.0); removes redundant/overfit models (M02/M10/M11/M12/M13/M15).",
+        }
+        method_test_preds["7_pruned_elite9_nested_stack"] = (w_m7_full @ Z_e9_te, False)
+        method_oof_preds["7_pruned_elite9_nested_stack"] = m7_nested
+
     # Pick overall winning method strictly by Nested 5-Fold Unseen OOF AUROC
     best_method = max(methods_report.keys(), key=lambda k: methods_report[k]["nested_5fold_oof"])
     best_te_arr, best_is_rank = method_test_preds[best_method]
     sub_path = queue_dir / "sub_queue15_best_ensemble.csv"
     sub_checks = export_verified_submission(sub_path, sample_sub_path, canon_test_ids, best_te_arr, is_rank=best_is_rank)
+
+    # Also export dedicated verified CSV for 5-Tower (zero-leakage 12m) if available
+    if "6_paradigm_5tower_nested_stack" in method_test_preds:
+        t5_te, t5_rank = method_test_preds["6_paradigm_5tower_nested_stack"]
+        export_verified_submission(
+            queue_dir / "sub_queue15_5tower_12models.csv",
+            sample_sub_path,
+            canon_test_ids,
+            t5_te,
+            is_rank=t5_rank,
+        )
+
+    # Export winning OOF predictions for `defectlab errors` (Train-only error analysis!)
+    best_oof_arr = method_oof_preds[best_method]
+    oof_records = [
+        {"image_path": img_id, "label": int(lbl), "fold": int(fld), "score": round(float(sc), 6)}
+        for img_id, lbl, fld, sc in zip(canon_train_ids, y_tr, fold_arr, best_oof_arr)
+    ]
+    (queue_dir / "val_oof_best.json").write_text(
+        json.dumps({"method": best_method, "oof_auroc": methods_report[best_method]["nested_5fold_oof"], "records": oof_records}),
+        encoding="utf-8",
+    )
 
     # Build Report-Ready Markdown Tables (`queue_report_tables.md`)
     md_lines = [
