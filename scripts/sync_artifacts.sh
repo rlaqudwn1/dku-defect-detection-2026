@@ -23,7 +23,7 @@ case "${ACTION}" in
     echo "[SYNC PUSH] Local -> ${REMOTE}"
     mkdir -p runs/queue15/models runs/submissions
     rclone copy runs/queue15/models "${REMOTE}/queue15/models" --include "M*.npz" --transfers 8 --progress
-    for f in runs/folds_unseen.json runs/queue15/ensemble_summary.json runs/queue15/queue_report_tables.md; do
+    for f in runs/folds_unseen.json runs/day0_recal/canonical_cids.npz runs/day0_recal/recal_summary.json runs/queue15/ensemble_summary.json runs/queue15/queue_report_tables.md; do
       if [[ -f "${f}" ]]; then
         rclone copyto "${f}" "${REMOTE}/${f#runs/}"
       fi
@@ -33,9 +33,9 @@ case "${ACTION}" in
     ;;
   pull)
     echo "[SYNC PULL] ${REMOTE} -> Local"
-    mkdir -p runs/queue15/models runs/submissions
+    mkdir -p runs/queue15/models runs/submissions runs/day0_recal
     rclone copy "${REMOTE}/queue15/models" runs/queue15/models --include "M*.npz" --transfers 8 --progress
-    for f in folds_unseen.json queue15/ensemble_summary.json queue15/queue_report_tables.md; do
+    for f in folds_unseen.json day0_recal/canonical_cids.npz day0_recal/recal_summary.json queue15/ensemble_summary.json queue15/queue_report_tables.md; do
       rclone copyto "${REMOTE}/${f}" "runs/${f}" 2>/dev/null || true
     done
     echo "[SYNC PULL] Done. Local models:"
