@@ -121,6 +121,13 @@ def prepare_data_root(data_root_arg: str | None, zip_path_arg: str | None) -> Pa
                 if (sub / "train.csv").is_file():
                     return sub
 
+    # Fallback recursive search on Kaggle input mount
+    ki = Path("/kaggle/input")
+    if ki.exists():
+        for tc in ki.rglob("train.csv"):
+            if (tc.parent / "sample_submission.csv").is_file():
+                return tc.parent
+
     # Last resort search on Google Drive
     if drive_root.exists():
         for tc in drive_root.rglob("train.csv"):
