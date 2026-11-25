@@ -87,7 +87,7 @@ MODEL_REGISTRY = {
         "native_ar": False,
         "layers": [18, 25],
         "layer_weights": [0.6, 0.4],
-        "channel_weights": [0.40, 0.60, 0.00],
+        "channel_weights": [0.80, 0.20, 0.00],  # One-Change from M17 audit: keep logical=0, restore musc=0.80 for non-DINOv2
         "batch_size": 4,
         "license": "Apache-2.0 (Google 2023)",
     },
@@ -99,7 +99,7 @@ MODEL_REGISTRY = {
         "native_ar": False,
         "layers": [1, 2],  # Stage-2 (48x48 kept native!) & Stage-3 (24x24)
         "layer_weights": [0.45, 0.55],
-        "channel_weights": [0.40, 0.60, 0.00],
+        "channel_weights": [0.80, 0.20, 0.00],
         "batch_size": 6,
         "license": "MIT (LAION/Meta 2023)",
     },
