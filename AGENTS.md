@@ -11,7 +11,7 @@
 - **오답 주도 EDA (Train 전용)**: 새 Champion이 나오면 반드시 `defectlab errors`로 **Train 검증 Fold의** FP/FN Top-20을 확인하고 다음 가설을 도출한다.
 - **루프 종료 30초 의식 (필수)**:
   1. `EXPERIMENTS.md` 표에 결과 1줄 추가 (실패/폐기 포함).
-  2. `STATE.md` 덮어쓰기 (Champion, 최신 Train 오답 관찰, Dead Ends, 다음 행동 1개 갱신 — 50줄 이내 유지).
+  2. `STATE.md` 덮어쓰기 (Champion, 최신 Train 오답 관찰, Dead Ends, 다음 행동 1개 갱신 — 100줄 이내 유지).
   3. 새로운 보고서·요약 `.md` 파일을 남발하지 않는다.
 
 ## 3. 대회 규정 및 엄격한 Test 격리 경계
