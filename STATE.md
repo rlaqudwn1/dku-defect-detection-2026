@@ -3,38 +3,28 @@
 > **규칙**: 이 파일은 **항상 덮어쓴다(누적 금지)**. 새 연구원 세션은 `AGENTS.md` → `STATE.md` → `EXPERIMENTS.md` 3개만 읽고 즉시 작업을 이어간다. **Test 이미지 육안 열람은 엄격히 금지한다.**
 
 ## 1. 현재 Champion & 검증 기준
-- **CV Split**: `runs/folds_unseen.json` (Train 10,821장 / 5-Fold Unseen) + **`Sim-LB-800`** (`scripts/sim_lb_800.py`, 200회 파편화·가변불량률 시뮬레이터)
+- **CV Split**: `runs/folds_unseen.json` (Train 10,821장 / 5-Fold Unseen) + **`Sim-LB-800`** (`scripts/sim_lb_800.py`)
 - **Public LB 1위 (Champion)**: **`E14-Q15` (`Elite-9`, OOF `0.9520` / Track B `Top2Mean 0.9533` / Public LB `0.884610`)**
-- **Day 0 최신 돌파 (`E15-Recal`)**: `scripts/cluster_v2_and_recal.py` 완료 → **Test Singleton `152/800(19.0%) → 1/800(0.12%)` 박멸**, `Sim-LB-800` **`0.9320 → 0.9375 (+0.0055, P10 +0.0089)`**, **Fold 0 `0.9070 → 0.9181 (+0.0111)`**!
-  - Day 1 [제출 1] 검증 완료 후보: `runs/submissions/sub_e15_recal_cluster_v2_left_tail.csv`
-  - 공유 캐시 동기화: **W&B Artifact `dku-model-cache:latest`** (`scripts/sync_wandb_artifacts.py`, Zero-OAuth, `M01~M15.npz` + `canonical_cids.npz` + `folds_unseen.json`)
+- **Day 0 Track B (`E15-Recal`)**: `Cluster-v2` Test Singleton `19.0%→0.12%`, `Sim-LB-800` `0.9320→0.9375`, `Fold 0` `0.9070→0.9181`.
+- **W&B Artifact 동기화**: `dku-model-cache:latest` 최신 반영 완료 (`M01~M16.npz` + `canonical_cids.npz` + `folds_unseen.json`, 21 files).
 
-## 2. CV-LB 갭(`-0.0674`) 3대 근본 원인 & Blackwell 제약
-- **원인 1 (해결)**: 기존 `k_den=20 / P25` 절단으로 Test `19.0%`(152장)가 `cid=-1` Singleton 탈락 → `Cluster-v2`로 `0.12%`로 박멸.
-- **원인 2 (해결)**: 불량률 `>25%` 클러스터에서 `IQR(P75-P25)` 폭발 → `Left-Tail Robust-Z (P35, P15~P50)`로 해결.
-- **원인 3 (교내 서버 단일 트랙 공략)**: `M01/M06`은 DINOv2 단일 가문(`ρ=0.90`) + 151장 동료비교 꺼진 상태였음 → **교내 Blackwell 서버에서 이종 백본 `MuSc-v2` 4종(`M16~M19`, `lo_i>=1` + `Bank-TTA` + `Cluster-SVD`) 순차 완주**.
-- **교내 Blackwell 제약 (필수)**: `VRAM 5.50 GiB`, `cgroup RAM 8.0 GiB (Swap 0B)`, `Disk 64 GB`, `num_workers=0`, 1-레이어 `memmap + POSIX_FADV_DONTNEED`.
+## 2. Track A Blackwell 자가 최적화 루프 실측 노하우 (M16 완료 → M17 진행)
+- **M16 (`M16_musc_dinov2_reg4_l`, 19.3분 완주, W&B `iz42czmu`)**:
+  - 리소스: 유휴 VRAM `1.13G` / 활성 `~2.75G` (F0 `448×672` 시 일시적 HAMI-core OOM 경고 1회 후 자동 회수, 크래시 없음), RAM `2.33G`, Swap `0B`.
+  - 기본 결합 `(0.72/0.18/0.10)` OOF **`0.8996`** (`F0 0.8246`, `F1 0.9016`, `F2 0.9543`, `F3 0.9551`, `F4 0.9690`), `ρ(M01)=0.775`.
+  - **3-채널 정량 감사 (Train-Only, 핵심 돌파구)**:
+    - `z_svd`: **OOF `0.9191`** (`F0 0.9016`, `M01 0.8737` 대비 **`+0.0279`**, `ρ(M01)=0.693`)! `F0 cid=2`(2제품 병합, n=2200)에서 `0.8517` vs `M01 0.7846` (`+0.0671`).
+    - `z_musc`: OOF `0.8933` (`F0 0.7981`, `F0 cid=2 0.6401` 급락 — `max_bank=120` 초과 시 Farthest-Point `argmax(min_d)`가 정상 코어 대신 풀 내 극단치를 뱅크로 선발하는 현상 의심).
+    - `z_logical`: OOF `0.7545` (`F0 0.6534`, `cid=2 0.5022` 랜덤 수준) → Nested 5-Fold 전 Fold 최적 가중 `0.00`.
+    - 최적 채널 결합 `(0.40, 0.60, 0.00)` 시 M16 단독 `0.9200` (`F0 0.8823`), Elite-10 `0.9491 → 0.9529` (SVD 단독 반영 시 **`0.9548`, F0 `0.9177`**!).
+  - 16-모델 앙상블 변화 (기본 M16 기준): `Equal-Z 0.9387→0.9436 (+0.0049)`, `5-Tower 0.9476→0.9470`, `Elite 0.9520→0.9491` (원인: `z_logical` 노이즈 + `z_musc` 과다 비중).
 
 ## 3. 절대 다시 하지 말 것 (Dead Ends)
-- Test 이미지 육안 열람 / 외부 데이터·원본 라벨 조회 (코드 검증 실격)
-- E2E 백본 전체 파인튜닝(`M15 0.6781`) / Diffusion·GAN 학습 / 균등축소 L2(`l2=2.0`)
-- `k_den=20` 하위 25% 밀도 일괄 절단 / `IQR(P75-P25)` 단독 보정 / 중복 백본 25+ 양산
+- Test 이미지 육안 열람 / 외부 데이터·라벨 조회 / Git에 Drive ID·`runs/`·`artifacts/` 커밋
+- E2E 전체 파인튜닝(`M15 0.6781`) / `k_den=20` P25 일괄 절단 / `IQR` 단독 보정 / `z_logical` 고정 `0.10` 혼합
 
-## 4. Day 1 교내 Blackwell 서버 단일 트랙 실행 계획 (목표: LB `0.92+` → 최종 `0.95+`)
-1. **최신 코드 & W&B Artifact 동기화 (OAuth 불필요, `WANDB_API_KEY` 1개면 완료)**:
-   - `git pull origin rlaqudwn1/dku-eda-saved-handoff`
-   - `python scripts/sync_wandb_artifacts.py pull`
-2. **이종 백본 `MuSc-v2` 4종 순차 실행** (Fold별 자동 체크포인트 복구 + `progress.json` + W&B 실시간 로깅 + 완료 시 W&B Artifact 자동 push 및 보고서 갱신):
-   - `PYTHONPATH=scripts python scripts/run_musc_v2_blackwell.py --model M16_musc_dinov2_reg4_l --wandb --auto-sync`
-   - `PYTHONPATH=scripts python scripts/run_musc_v2_blackwell.py --model M17_musc_eva02_l448 --wandb --auto-sync`
-   - `PYTHONPATH=scripts python scripts/run_musc_v2_blackwell.py --model M18_musc_siglip_so400m_384 --wandb --auto-sync`
-   - `PYTHONPATH=scripts python scripts/run_musc_v2_blackwell.py --model M19_musc_convnext_l384 --wandb --auto-sync`
-
-## 5. 교내 Blackwell 서버 새 세션 시작 프롬프트 (복사해서 붙여넣기)
-```text
-먼저 `git pull origin rlaqudwn1/dku-eda-saved-handoff`를 받고 `python scripts/sync_wandb_artifacts.py pull`로
-최신 모델 캐시(M01~M15)와 공유 클러스터(canonical_cids.npz)를 W&B Artifact에서 내려받아줘.
-그다음 AGENTS.md, STATE.md, EXPERIMENTS.md를 읽어줘. (Test 이미지는 절대 열람/시각화 금지!)
-STATE.md "4. Day 1 교내 Blackwell 서버 단일 트랙 실행 계획"대로 `scripts/run_musc_v2_blackwell.py`로
-M16 -> M17 -> M18 -> M19를 `--wandb --auto-sync` 옵션으로 순차 실행해줘.
-```
+## 4. 다음 행동 1개 (One-Change Rule)
+- **M17 (`M17_musc_eva02_l448`)에 딱 1개 변수 반영**: `channel_weights: [0.72, 0.18, 0.10] → [0.40, 0.60, 0.00]` (`z_logical` 제거 + `z_svd` 상향; 단 3채널 원본 `.npz`는 모두 보존).
+- 더미 텐서 스모크 테스트 통과 후 실행:
+  `PYTHONPATH=scripts python scripts/run_musc_v2_blackwell.py --model M17_musc_eva02_l448 --wandb --auto-sync`
+- M17 완료 후 `F0 cid=2`에서 `z_musc` 급락이 재현되면, **M18 1-변수 최적화로 뱅크 선발(Farthest-Point → Top-Purity Core) 교정** 적용 예정.

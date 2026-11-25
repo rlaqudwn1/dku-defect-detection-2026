@@ -62,6 +62,7 @@ MODEL_REGISTRY = {
         "native_ar": True,  # (448, 672) for W/H>=1.25, (672, 448) for H/W>=1.25, else (518, 518)
         "layers": [17, 23],
         "layer_weights": [0.6, 0.4],
+        "channel_weights": [0.72, 0.18, 0.10],
         "batch_size": 6,
         "license": "Apache-2.0 (Meta 2023)",
     },
@@ -73,6 +74,7 @@ MODEL_REGISTRY = {
         "native_ar": False,
         "layers": [17, 23],
         "layer_weights": [0.6, 0.4],
+        "channel_weights": [0.40, 0.60, 0.00],  # One-Change from M16 audit: drop noisy logical(0.7545), boost orthogonal svd(0.9191)
         "batch_size": 6,
         "license": "MIT (BAAI 2023)",
     },
@@ -85,6 +87,7 @@ MODEL_REGISTRY = {
         "native_ar": False,
         "layers": [18, 25],
         "layer_weights": [0.6, 0.4],
+        "channel_weights": [0.40, 0.60, 0.00],
         "batch_size": 4,
         "license": "Apache-2.0 (Google 2023)",
     },
@@ -96,6 +99,7 @@ MODEL_REGISTRY = {
         "native_ar": False,
         "layers": [1, 2],  # Stage-2 (48x48 kept native!) & Stage-3 (24x24)
         "layer_weights": [0.45, 0.55],
+        "channel_weights": [0.40, 0.60, 0.00],
         "batch_size": 6,
         "license": "MIT (LAION/Meta 2023)",
     },
@@ -672,8 +676,9 @@ def main() -> None:
             z_m = left_tail_robust_z(musc_f, cids_cal)
             z_s = left_tail_robust_z(svd_f, cids_cal)
             z_l = left_tail_robust_z(log_f, cids_cal)
-            raw_f = 0.72 * musc_f + 0.18 * svd_f + 0.10 * log_f
-            z_f = 0.72 * z_m + 0.18 * z_s + 0.10 * z_l
+            wm, ws, wl = cfg.get("channel_weights", [0.72, 0.18, 0.10])
+            raw_f = wm * musc_f + ws * svd_f + wl * log_f
+            z_f = wm * z_m + ws * z_s + wl * z_l
             np.savez_compressed(
                 ckpt_p, ids=np.array(val_ids), raw=raw_f, z=z_f,
                 musc=musc_f, svd=svd_f, logical=log_f, maps_32=maps_f,
@@ -733,11 +738,12 @@ def main() -> None:
             test_musc, test_svd, test_log, test_maps, cids_te_cal = run_split_single_pass(
                 model, norm_params, cfg, Path(args.data_root), test_ids, "test", te_cids, vlm_te, tmp_dir, device
             )
-            test_raw = 0.72 * test_musc + 0.18 * test_svd + 0.10 * test_log
+            wm, ws, wl = cfg.get("channel_weights", [0.72, 0.18, 0.10])
+            test_raw = wm * test_musc + ws * test_svd + wl * test_log
             test_z = (
-                0.72 * left_tail_robust_z(test_musc, cids_te_cal)
-                + 0.18 * left_tail_robust_z(test_svd, cids_te_cal)
-                + 0.10 * left_tail_robust_z(test_log, cids_te_cal)
+                wm * left_tail_robust_z(test_musc, cids_te_cal)
+                + ws * left_tail_robust_z(test_svd, cids_te_cal)
+                + wl * left_tail_robust_z(test_log, cids_te_cal)
             )
             np.savez_compressed(
                 ckpt_te, ids=np.array(test_ids), raw=test_raw, z=test_z,
@@ -752,6 +758,7 @@ def main() -> None:
             "paradigm": cfg["paradigm"],
             "backbone": cfg["backbone"],
             "license": cfg["license"],
+            "channel_weights": cfg.get("channel_weights", [0.72, 0.18, 0.10]),
             "raw_oof_auroc": round(overall_oof, 4),
             "per_fold": per_fold_aucs,
         }
