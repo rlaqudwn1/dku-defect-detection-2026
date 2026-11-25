@@ -138,9 +138,11 @@ def left_tail_robust_z(raw: np.ndarray, cids: np.ndarray) -> np.ndarray:
         if nc >= 4:
             c_mu = float(np.percentile(v, 35))
             c_sig = max(float((np.percentile(v, 50) - np.percentile(v, 15)) / 0.967), 0.35 * g_sig, 1e-5)
-            w = (nc - 1.0) / (nc + 3.0)
-            eff_mu = w * c_mu + (1.0 - w) * g_mu
-            eff_sig = w * c_sig + (1.0 - w) * g_sig
+            w_mu = (nc - 1.0) / (nc + 3.0)
+            # Conservative denominator shrinkage prevents small-cluster (n_c=4..10) quantile variance explosion!
+            w_sig = max(0.0, nc - 8.0) / (nc + 20.0)
+            eff_mu = w_mu * c_mu + (1.0 - w_mu) * g_mu
+            eff_sig = w_sig * c_sig + (1.0 - w_sig) * g_sig
             out[m] = (v - eff_mu) / eff_sig
         elif nc in (2, 3):
             # Small cluster (2~3 samples): anchor normal baseline on minimum peer

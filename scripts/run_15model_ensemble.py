@@ -323,11 +323,11 @@ def run_ensemble_analysis(
     }
 
     # Method 6: Paradigm-Hierarchical 5-Tower Nested Stack (zero-leakage structural grouping)
-    # Prevents 13 supervised/VLM models from diluting the 2 unsupervised MuSc models (0% domain shift).
-    # Excludes collapsed/E2E-overfit models (M15 E2E 0.6781, M12 Fold-1 0.4837, M10 dominated OpenAI ZS).
+    # Dynamically includes M16~M19 (MuSc-v2) whenever available, and protects Unsupervised MuSc weight!
     idx_by_prefix = {mid[:3]: i for i, mid in enumerate(model_ids)}
+    musc_keys = [k for k in ("M01", "M06", "M16", "M17", "M18", "M19", "M20") if k in idx_by_prefix]
     tower_spec = {
-        "A_MuSc": [idx_by_prefix[k] for k in ("M01", "M06") if k in idx_by_prefix],
+        "A_MuSc": [idx_by_prefix[k] for k in musc_keys],
         "B_VAND": [idx_by_prefix[k] for k in ("M02", "M07", "M11") if k in idx_by_prefix],
         "C_ZeroShot": [idx_by_prefix[k] for k in ("M03", "M05") if k in idx_by_prefix],
         "D_PatchMIL_ViT": [idx_by_prefix[k] for k in ("M08", "M13") if k in idx_by_prefix],
@@ -357,15 +357,15 @@ def run_ensemble_analysis(
         methods_report["6_paradigm_5tower_nested_stack"] = {
             "nested_5fold_oof": round(float(roc_auc_score(y_tr, m6_nested)), 4),
             "weights": {tn: round(float(w), 4) for tn, w in zip(t_names, w_m6_full)},
-            "why": "Paradigm-hierarchical 5-tower stack (12m, excl M10/M12/M15); preserves 30% unsupervised MuSc weight without uniform-shrinkage dilution.",
+            "why": f"Paradigm-hierarchical 5-tower stack (incl {len(musc_keys)} MuSc models); preserves unsupervised MuSc weight.",
         }
         method_test_preds["6_paradigm_5tower_nested_stack"] = (w_m6_full @ T_te, False)
         method_oof_preds["6_paradigm_5tower_nested_stack"] = m6_nested
 
-    # Method 7: Pruned Non-Redundant Elite-9 Nested Stack (1-2 strongest non-redundant models per family)
-    elite9_keys = ("M01", "M06", "M07", "M05", "M03", "M08", "M14", "M04", "M09")
-    elite9_idxs = [idx_by_prefix[k] for k in elite9_keys if k in idx_by_prefix]
-    if len(elite9_idxs) == len(elite9_keys):
+    # Method 7: Pruned Non-Redundant Elite Nested Stack (dynamically adds M16~M20 MuSc-v2!)
+    elite_keys = tuple(musc_keys) + ("M07", "M05", "M03", "M08", "M14", "M04", "M09")
+    elite9_idxs = [idx_by_prefix[k] for k in elite_keys if k in idx_by_prefix]
+    if len(elite9_idxs) >= 5:
         Z_e9_oof = Z_oof[elite9_idxs]
         Z_e9_te = Z_te[elite9_idxs]
         m7_nested = np.zeros(len(y_tr), dtype=np.float64)
@@ -378,7 +378,7 @@ def run_ensemble_analysis(
         methods_report["7_pruned_elite9_nested_stack"] = {
             "nested_5fold_oof": round(float(roc_auc_score(y_tr, m7_nested)), 4),
             "weights": {model_ids[i]: round(float(w), 4) for i, w in zip(elite9_idxs, w_m7_full)},
-            "why": "Pruned non-redundant Elite-9 stack (L2-to-zero=1.0); removes redundant/overfit models (M02/M10/M11/M12/M13/M15).",
+            "why": f"Pruned non-redundant Elite-{len(elite9_idxs)} stack (L2-to-zero=1.0, dynamically includes M16~M20 MuSc-v2).",
         }
         method_test_preds["7_pruned_elite9_nested_stack"] = (w_m7_full @ Z_e9_te, False)
         method_oof_preds["7_pruned_elite9_nested_stack"] = m7_nested

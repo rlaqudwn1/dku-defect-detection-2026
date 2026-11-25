@@ -1,20 +1,17 @@
 """Track A: MuSc-v2 Automated Blackwell & Kaggle Runner (M16~M19 Orthogonal Backbones).
 
-Implements the Grand Master Plan MuSc-v2 upgrades with strict Blackwell container safety
-(VRAM <= 5.5 GiB, cgroup RAM <= 8.0 GiB / Swap 0B, Disk <= 64 GB, num_workers=0):
-  1. Zero-Singleton Canonical Product Graph (`Cluster-v2`, shared via canonical_cids.npz or on-the-fly)
-  2. Small-Cluster Safe Quantile (`lo_i >= 1`, prevents 1-NN defect-defect matching in n_c <= 28)
-  3. Zero-Cost Pose-Augmented `Bank-TTA` (horizontal patch-grid flip for n_c < 40 clusters)
-  4. Multi-Granular 3-Channel Patch Aggregation (Micro top-0.5% + 3x3 Spatial Co-location + Meso top-5%)
-  5. Test-Time `Cluster-SVD Subspace` Reconstruction Error (`svd_lowrank` on normal core patches)
-  6. Prevalence-Invariant `Left-Tail Robust-Z` (P35 center, P15..P50 normal half-width)
-  7. Per-Fold Auto-Resume Checkpoints + Live `progress.json` + W&B Real-Time Logging + Auto-Sync/Report
-
-Supported models (`--model`):
-  - M16_musc_dinov2_reg4_l  : vit_large_patch14_reg4_dinov2.lvd142m (518px / Native-AR 672x448)
-  - M17_musc_eva02_l448     : eva02_large_patch14_448.mim_m38m_ft_in22k_in1k (448px, 32x32)
-  - M18_musc_siglip_so400m_384 : ViT-SO400M-14-SigLIP-384 (384px, 27x27, OpenCLIP)
-  - M19_musc_convnext_l384  : convnext_large_mlp.clip_laion2b_soup_ft_in12k_in1k_384 (384px, CNN 24x24)
+Audited & hardened for strict Blackwell cgroup limits (VRAM <= 5.5 GiB, cgroup RAM <= 8.0 GiB,
+Swap 0B, Disk <= 64 GB, CPU quota throttling):
+  - Caps BLAS/OpenMP/PyTorch CPU threads to 2 BEFORE importing numpy/torch (prevents CPU overload)
+  - Zero-copy disk-backed memmap streaming (NEVER loads full cluster into RAM) + periodic
+    `mm.flush()` & `POSIX_FADV_DONTNEED` every 128 images (prevents cgroup page-cache OOMKill!)
+  - Single-pass multi-layer extraction (2x faster!) with `output_fmt="NCHW"` + `bfloat16` autocast
+  - Immediately frees unused 450M text tower on M18 (SigLIP-SO400M)
+  - `ImageOps.exif_transpose` + genuine `Native-AR` (`672x448` / `448x672` / `518x518`) on M16
+  - `LNA (r=1 + r=3)` + `min(orig, flip)` unique-peer `Bank-TTA` (fixes duplicate-slot lo_i bug)
+  - VLM-Guided Bank Purification (uses M05/M03 normal confidence if available to prevent >50% defect bank pollution)
+  - Multi-Granular 3-Channel + Global Logical Channel + Cluster-SVD Subspace + `32x32` 2D Anomaly Map saving
+  - Private-Safe: verifies `test_ids` match before using `canonical_cids.npz`, else computes Cluster-v2 on-the-fly!
 
 ZERO Test images are ever rendered, saved, or visually inspected.
 """
@@ -30,14 +27,30 @@ import sys
 import time
 from pathlib import Path
 
-import numpy as np
-import torch
-import torch.nn.functional as F
-from PIL import Image
-from sklearn.metrics import roc_auc_score
-from torchvision import transforms
+# CRITICAL: Cap CPU threads BEFORE importing numpy/torch to prevent cgroup CPU throttling & pod reset!
+for _env in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_env, "2")
 
-from cluster_v2_and_recal import cluster_v2_zero_singleton, left_tail_robust_z
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
+from PIL import Image, ImageOps  # noqa: E402
+from sklearn.metrics import roc_auc_score  # noqa: E402
+from torchvision import transforms  # noqa: E402
+
+from cluster_v2_and_recal import cluster_v2_zero_singleton, left_tail_robust_z  # noqa: E402
+
+torch.set_num_threads(2)
+try:
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
 
 
 MODEL_REGISTRY = {
@@ -46,9 +59,10 @@ MODEL_REGISTRY = {
         "backend": "timm_vit",
         "backbone": "vit_large_patch14_reg4_dinov2.lvd142m",
         "img_size": 518,
+        "native_ar": True,  # (448, 672) for W/H>=1.25, (672, 448) for H/W>=1.25, else (518, 518)
         "layers": [17, 23],
         "layer_weights": [0.6, 0.4],
-        "batch_size": 8,
+        "batch_size": 6,
         "license": "Apache-2.0 (Meta 2023)",
     },
     "M17_musc_eva02_l448": {
@@ -56,9 +70,10 @@ MODEL_REGISTRY = {
         "backend": "timm_vit",
         "backbone": "eva02_large_patch14_448.mim_m38m_ft_in22k_in1k",
         "img_size": 448,
+        "native_ar": False,
         "layers": [17, 23],
         "layer_weights": [0.6, 0.4],
-        "batch_size": 8,
+        "batch_size": 6,
         "license": "MIT (BAAI 2023)",
     },
     "M18_musc_siglip_so400m_384": {
@@ -67,9 +82,10 @@ MODEL_REGISTRY = {
         "backbone": "ViT-SO400M-14-SigLIP-384",
         "pretrained": "webli",
         "img_size": 384,
+        "native_ar": False,
         "layers": [18, 25],
         "layer_weights": [0.6, 0.4],
-        "batch_size": 8,
+        "batch_size": 4,
         "license": "Apache-2.0 (Google 2023)",
     },
     "M19_musc_convnext_l384": {
@@ -77,9 +93,10 @@ MODEL_REGISTRY = {
         "backend": "timm_cnn",
         "backbone": "convnext_large_mlp.clip_laion2b_soup_ft_in12k_in1k_384",
         "img_size": 384,
-        "layers": [1, 2],  # Stage-2 (48x48->24x24) & Stage-3 (24x24)
+        "native_ar": False,
+        "layers": [1, 2],  # Stage-2 (48x48 kept native!) & Stage-3 (24x24)
         "layer_weights": [0.45, 0.55],
-        "batch_size": 8,
+        "batch_size": 6,
         "license": "MIT (LAION/Meta 2023)",
     },
 }
@@ -151,253 +168,377 @@ def resolve_img_path(data_root: Path, img_id: str, split: str) -> Path:
     raise FileNotFoundError(f"Image not found: {img_id} in {data_root}/{split}")
 
 
-def load_backbone(cfg: dict, device: torch.device):
+def pick_target_hw(data_root: Path, img_ids: list[str], split: str, cfg: dict) -> tuple[int, int]:
+    """Determine Native-AR (H, W) from median aspect ratio of the split (only when native_ar=True)."""
+    sz = cfg["img_size"]
+    if not cfg.get("native_ar", False):
+        return (sz, sz)
+    ratios = []
+    for img_id in img_ids[: min(64, len(img_ids))]:
+        with Image.open(resolve_img_path(data_root, img_id, split)) as im:
+            im = ImageOps.exif_transpose(im)
+            ratios.append(im.width / max(1, im.height))
+    med_ar = float(np.median(ratios)) if ratios else 1.0
+    if med_ar >= 1.25:
+        return (448, 672)  # 32x48 = 1,536 patches (+30% horizontal res, 0% distortion!)
+    if med_ar <= 0.80:
+        return (672, 448)
+    return (sz, sz)
+
+
+def load_backbone(cfg: dict, device: torch.device, pretrained: bool = True):
     backend = cfg["backend"]
-    img_size = cfg["img_size"]
+    gc.collect()
 
     if backend == "timm_vit":
         import timm
 
-        model = timm.create_model(cfg["backbone"], pretrained=True, img_size=img_size, dynamic_img_size=True)
-        model.eval().to(device)
+        model = timm.create_model(
+            cfg["backbone"],
+            pretrained=pretrained,
+            img_size=cfg["img_size"],
+            dynamic_img_size=True,
+        )
+        model.eval().to(device=device)
         data_cfg = timm.data.resolve_model_data_config(model)
-        tf = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=data_cfg["mean"], std=data_cfg["std"]),
-        ])
-        return model, tf
+        norm_params = (data_cfg["mean"], data_cfg["std"])
+        return model, norm_params
 
     if backend == "timm_cnn":
         import timm
 
-        model = timm.create_model(cfg["backbone"], pretrained=True, features_only=True, out_indices=cfg["layers"])
-        model.eval().to(device)
+        model = timm.create_model(
+            cfg["backbone"],
+            pretrained=pretrained,
+            features_only=True,
+            out_indices=cfg["layers"],
+        )
+        model.eval().to(device=device)
         data_cfg = timm.data.resolve_model_data_config(model)
-        tf = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=data_cfg["mean"], std=data_cfg["std"]),
-        ])
-        return model, tf
+        norm_params = (data_cfg["mean"], data_cfg["std"])
+        return model, norm_params
 
     if backend == "openclip_vit":
         import open_clip
 
-        model, _, preprocess = open_clip.create_model_and_transforms(
-            cfg["backbone"], pretrained=cfg["pretrained"], device=device
+        # Load on CPU first -> immediately drop unused 450M text tower -> move ONLY visual to GPU!
+        full_model, _, _ = open_clip.create_model_and_transforms(
+            cfg["backbone"],
+            pretrained=cfg["pretrained"] if pretrained else None,
+            device="cpu",
         )
-        model.eval()
-        tf = transforms.Compose([
-            transforms.Resize((img_size, img_size), interpolation=transforms.InterpolationMode.BICUBIC),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5)),
-        ])
-        return model, tf
+        visual = full_model.visual
+        del full_model
+        gc.collect()
+        visual.eval().to(device=device)
+        norm_params = ((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
+        return visual, norm_params
 
     raise ValueError(f"Unknown backend: {backend}")
 
 
+def make_transform(hw: tuple[int, int], norm_params: tuple) -> transforms.Compose:
+    mean, std = norm_params
+    return transforms.Compose([
+        transforms.Resize(hw, interpolation=transforms.InterpolationMode.BICUBIC),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=mean, std=std),
+    ])
+
+
 @torch.no_grad()
-def extract_single_layer_tokens(
+def extract_multi_layer_tokens(
     model,
     backend: str,
     x: torch.Tensor,
-    layer_idx: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (cls_emb [B, D], patch_grid [B, H, W, D]) normalized on GPU."""
-    if backend == "timm_vit":
-        feats = model.forward_intermediates(
-            x, indices=[layer_idx], return_prefix_tokens=True, norm=True, output_fmt="NHWC"
-        )
-        # timm returns (final_feat, [(spatial_NHWC, prefix_tokens)]) or list of tuples
-        inter = feats[1][0] if isinstance(feats, tuple) else feats[0]
-        if isinstance(inter, tuple):
-            patch_hwc, prefix = inter
-            cls_emb = prefix[:, 0, :]
-        else:
-            patch_hwc = inter
-            cls_emb = patch_hwc.mean(dim=(1, 2))
-        patch_hwc = F.normalize(patch_hwc.float(), dim=-1)
-        cls_emb = F.normalize(cls_emb.float(), dim=-1)
-        return cls_emb, patch_hwc
+    layers: list[int],
+) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """Single-pass multi-layer extraction with bfloat16 autocast and output_fmt='NCHW'.
 
-    if backend == "timm_cnn":
-        fmaps = model(x)  # list of NCHW for out_indices
-        fmap = fmaps[layer_idx].float()
-        # Harmonize Stage-2 (48x48) to 24x24 so memory stays < 4 GB on Blackwell
-        if fmap.shape[-1] > 28:
-            fmap = F.avg_pool2d(fmap, kernel_size=2, stride=2)
-        cls_emb = F.normalize(fmap.mean(dim=(2, 3)), dim=-1)
-        patch_hwc = F.normalize(fmap.permute(0, 2, 3, 1).contiguous(), dim=-1)
-        return cls_emb, patch_hwc
+    Returns: (cls_emb [B, D_cls], list of patch_hwc [B, H, W, D] per layer)
+    """
+    use_amp = x.device.type == "cuda"
+    amp_ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_amp else torch.no_grad()
 
-    if backend == "openclip_vit":
-        trunk = model.visual.trunk
-        feats = trunk.forward_intermediates(
-            x, indices=[layer_idx], return_prefix_tokens=True, norm=True, output_fmt="NHWC"
-        )
-        inter = feats[1][0] if isinstance(feats, tuple) else feats[0]
-        if isinstance(inter, tuple):
-            patch_hwc, prefix = inter
-            cls_emb = prefix[:, 0, :] if prefix.shape[1] > 0 else patch_hwc.mean(dim=(1, 2))
-        else:
-            patch_hwc = inter
-            cls_emb = patch_hwc.mean(dim=(1, 2))
-        patch_hwc = F.normalize(patch_hwc.float(), dim=-1)
-        cls_emb = F.normalize(cls_emb.float(), dim=-1)
-        return cls_emb, patch_hwc
+    with amp_ctx:
+        if backend == "timm_vit":
+            _, inters = model.forward_intermediates(
+                x, indices=layers, return_prefix_tokens=True, norm=True, output_fmt="NCHW"
+            )
+            patch_list = []
+            cls_emb = None
+            for item in inters:
+                if isinstance(item, tuple):
+                    p_nchw, prefix = item
+                    if prefix is not None and prefix.shape[1] > 0:
+                        cls_emb = prefix[:, 0, :].float()
+                else:
+                    p_nchw = item
+                p_hwc = F.normalize(p_nchw.float().permute(0, 2, 3, 1).contiguous(), dim=-1)
+                patch_list.append(p_hwc)
+            if cls_emb is None:
+                cls_emb = patch_list[-1].mean(dim=(1, 2))
+            cls_emb = F.normalize(cls_emb.float(), dim=-1)
+            return cls_emb, patch_list
+
+        if backend == "timm_cnn":
+            fmaps = model(x)  # returns list matching out_indices=[1, 2] -> Stage2 (48x48) & Stage3 (24x24)
+            patch_list = []
+            for fmap in fmaps:
+                p_hwc = F.normalize(fmap.float().permute(0, 2, 3, 1).contiguous(), dim=-1)
+                patch_list.append(p_hwc)
+            cls_emb = F.normalize(fmaps[-1].float().mean(dim=(2, 3)), dim=-1)
+            return cls_emb, patch_list
+
+        if backend == "openclip_vit":
+            # `model` is already `full_model.visual` (text tower freed!)
+            trunk = model.trunk
+            _, inters = trunk.forward_intermediates(
+                x, indices=layers, return_prefix_tokens=True, norm=True, output_fmt="NCHW"
+            )
+            patch_list = []
+            for item in inters:
+                p_nchw = item[0] if isinstance(item, tuple) else item
+                p_hwc = F.normalize(p_nchw.float().permute(0, 2, 3, 1).contiguous(), dim=-1)
+                patch_list.append(p_hwc)
+            # SigLIP has no CLS token -> global mean of final extracted layer
+            cls_emb = F.normalize(patch_list[-1].mean(dim=(1, 2)), dim=-1)
+            return cls_emb, patch_list
 
     raise ValueError(backend)
 
 
-def score_cluster_musc_v2(
-    patches_np: np.ndarray,
-    cls_np: np.ndarray,
+def load_vlm_normal_prior(models_dir: Path, img_ids: list[str], split: str) -> np.ndarray | None:
+    """Load existing Zero-Shot VLM (M05 SigLIP + M03 WinCLIP) anomaly z-scores for Bank Purification."""
+    z_list = []
+    key_id = "oof_ids" if split == "train" else "test_ids"
+    key_z = "oof_z" if split == "train" else "test_z"
+    for prefix in ("M05", "M03"):
+        matches = sorted(models_dir.glob(f"{prefix}_*.npz"))
+        if not matches:
+            continue
+        d = np.load(matches[0], allow_pickle=True)
+        mp = dict(zip([str(x) for x in d[key_id]], d[key_z].astype(np.float64)))
+        if all(i in mp for i in img_ids):
+            z_list.append(np.array([mp[i] for i in img_ids], dtype=np.float64))
+    if not z_list:
+        return None
+    return np.mean(z_list, axis=0)
+
+
+def apply_lna_r3(patch_hwc: torch.Tensor) -> torch.Tensor:
+    """Local Neighborhood Aggregation (r=3) on GPU: (..., H, W, D) -> normalized (..., H, W, D)."""
+    orig_ndim = patch_hwc.ndim
+    if orig_ndim == 3:
+        x = patch_hwc.unsqueeze(0)
+    else:
+        x = patch_hwc
+    x_nchw = x.permute(0, 3, 1, 2).float()
+    pooled = F.avg_pool2d(x_nchw, kernel_size=3, stride=1, padding=1)
+    out = F.normalize(pooled.permute(0, 2, 3, 1).contiguous(), dim=-1).to(patch_hwc.dtype)
+    return out.squeeze(0) if orig_ndim == 3 else out
+
+
+def score_cluster_streaming(
+    mm: np.memmap,
+    idx: np.ndarray,
+    cls_all: np.ndarray,
+    vlm_prior: np.ndarray | None,
     device: torch.device,
-    use_bank_tta: bool = True,
-    svd_rank: int = 64,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Compute MuSc-v2 (Multi-Granular Peer + Spatial 3x3) AND Cluster-SVD Subspace score on GPU.
+    svd_rank: int = 48,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Zero-copy streaming MuSc-v2 + LNA(r=1,3) + min-merged Bank-TTA + Cluster-SVD + 32x32 Maps.
 
-    patches_np: (N_c, H, W, D) float16 normalized patch grid.
-    Returns: (musc_raw [N_c], svd_raw [N_c])
+    NEVER loads the full cluster into CPU RAM (`mm[idx]`)! Only loads bank (<=128 imgs) + 1 query at a time.
+    Returns: (musc_raw [N_c], svd_raw [N_c], logical_raw [N_c], map_32x32 [N_c, 32, 32] fp16)
     """
-    n_c, h, w, d = patches_np.shape
+    n_c = len(idx)
+    _, h, w, d = mm.shape
     p_cnt = h * w
-    if n_c <= 1:
-        # Pure singleton fallback: self-symmetry horizontal flip difference
-        pt = torch.from_numpy(patches_np[0]).to(device=device, dtype=torch.float32)
-        pt_flip = torch.flip(pt, dims=[1])
-        diff = 1.0 - (pt * pt_flip).sum(dim=-1)
-        sc = float(torch.topk(diff.reshape(-1), k=max(1, int(p_cnt * 0.01))).values.mean().item())
-        return np.array([sc], dtype=np.float64), np.array([sc], dtype=np.float64)
 
-    # 1. Core-Density Normal Bank selection inside cluster (top 65% densest normal peers)
-    sim_cls = cls_np @ cls_np.T
+    if n_c <= 1:
+        pt = torch.from_numpy(np.array(mm[idx[0]], copy=True)).to(device=device, dtype=torch.float32)
+        diff = 1.0 - (pt * torch.flip(pt, dims=[1])).sum(dim=-1)
+        sc = float(torch.topk(diff.reshape(-1), k=max(1, int(p_cnt * 0.01))).values.mean().item())
+        m32 = F.interpolate(diff.reshape(1, 1, h, w), size=(32, 32), mode="bilinear", align_corners=False)
+        return (
+            np.array([sc], dtype=np.float64),
+            np.array([sc], dtype=np.float64),
+            np.array([0.0], dtype=np.float64),
+            m32.squeeze(0).squeeze(0).cpu().numpy().astype(np.float16)[None, :, :],
+        )
+
+    # 1. Core-Density + VLM-Guided Bank Purification (prevents >50% defect bank pollution!)
+    cls_c = cls_all[idx]  # (N_c, D_cls)
+    sim_cls = cls_c @ cls_c.T
     np.fill_diagonal(sim_cls, -1.0)
     k_c = min(max(2, n_c // 3), n_c - 1)
     den = np.partition(sim_cls, -k_c, axis=1)[:, -k_c:].mean(axis=1)
-    bank_sz = max(2, min(n_c, int(round(0.65 * n_c))))
-    bank_idx = np.argsort(den)[::-1][:bank_sz]
+    den_z = (den - np.median(den)) / (np.std(den) + 1e-6)
 
-    # Cap memory bank size for huge Train folds (up to 160 diverse normal peers -> fits easily in 5.5 GiB VRAM)
-    if len(bank_idx) > 160:
-        step = np.linspace(0, len(bank_idx) - 1, 160, dtype=int)
-        bank_idx = bank_idx[step]
-
-    bank_t = torch.from_numpy(patches_np[bank_idx]).to(device=device, dtype=torch.float16)  # (B, H, W, D)
-    # Zero-cost Bank-TTA: double peer diversity via horizontal patch-grid flip for small clusters (n_c < 40)
-    if use_bank_tta and n_c < 40:
-        bank_flip = torch.flip(bank_t, dims=[2])
-        bank_all = torch.cat([bank_t, bank_flip], dim=0)  # (2B, H, W, D)
-        bank_src_ids = np.concatenate([bank_idx, bank_idx])
+    if vlm_prior is not None:
+        vp = vlm_prior[idx]
+        vp_z = (vp - np.median(vp)) / (np.std(vp) + 1e-6)
+        # Higher density AND lower VLM anomaly score = purest normal core!
+        purity = den_z - 0.50 * vp_z
     else:
-        bank_all = bank_t
-        bank_src_ids = bank_idx
+        purity = den_z
 
-    # 2. Test-Time Cluster-SVD Subspace Reconstruction (fit on normal core patches in ~0.05s on GPU!)
-    flat_bank = bank_all.reshape(-1, d).float()
-    if flat_bank.shape[0] > 16384:
-        sel = torch.linspace(0, flat_bank.shape[0] - 1, 16384, device=device).long()
+    # Select top 45% purest normal pool, capped at 120 peers via greedy farthest-point diversity
+    pool_sz = max(2, min(n_c, int(round(0.50 * n_c))))
+    pure_order = np.argsort(purity)[::-1][:pool_sz]
+    max_bank = 120
+    if len(pure_order) > max_bank:
+        # Farthest-point coreset inside pure normal pool (Scale-Invariant!)
+        selected = [int(pure_order[0])]
+        cand = cls_c[pure_order]
+        min_d = 1.0 - (cand @ cand[0])
+        for _ in range(max_bank - 1):
+            nxt = int(np.argmax(min_d))
+            selected.append(int(pure_order[nxt]))
+            min_d = np.minimum(min_d, 1.0 - (cand @ cand[nxt]))
+        bank_local = np.array(selected, dtype=np.int64)
+    else:
+        bank_local = pure_order
+
+    # Load ONLY bank_local images (<= 120 imgs -> <= 330 MB RAM/VRAM!)
+    bank_np = np.stack([np.array(mm[idx[bi]], copy=True) for bi in bank_local], axis=0)  # (B, H, W, D)
+    bank_r1 = torch.from_numpy(bank_np).to(device=device, dtype=torch.float16)
+    del bank_np
+    bank_r1_flip = torch.flip(bank_r1, dims=[2])
+    bank_r3 = apply_lna_r3(bank_r1)
+    bank_r3_flip = torch.flip(bank_r3, dims=[2])
+
+    # Global Logical Channel: normal bank mean CLS + mean patch vector
+    bank_cls_mu = cls_c[bank_local].mean(axis=0)
+    bank_cls_mu /= np.linalg.norm(bank_cls_mu) + 1e-8
+    bank_patch_mu = F.normalize(bank_r1.float().mean(dim=(0, 1, 2)), dim=-1)  # (D,)
+
+    # 2. Cluster-SVD Subspace (adaptive rank prevents small-cluster self-memorization!)
+    flat_bank = bank_r1.reshape(-1, d).float()
+    if flat_bank.shape[0] > 12288:
+        sel = torch.linspace(0, flat_bank.shape[0] - 1, 12288, device=device).long()
         flat_sub = flat_bank[sel]
     else:
         flat_sub = flat_bank
     mu_b = flat_sub.mean(dim=0, keepdim=True)
     centered = flat_sub - mu_b
-    q_eff = min(svd_rank, centered.shape[0] - 1, d - 1)
-    if q_eff >= 8:
-        _, _, V_svd = torch.svd_lowrank(centered, q=q_eff, niter=2)  # (D, q_eff)
-    else:
-        V_svd = None
+    q_eff = min(svd_rank, max(6, n_c * 2), d // 4, centered.shape[0] - 1)
+    V_svd = torch.svd_lowrank(centered, q=q_eff, niter=2)[2] if q_eff >= 6 else None
     del flat_bank, flat_sub, centered
 
-    # Prepare bank for fast batched matmul: (B_all, P, D)
-    B_all = bank_all.shape[0]
-    bank_flat = bank_all.reshape(B_all, p_cnt, d)
+    B = bank_r1.shape[0]
+    b1_f = bank_r1.reshape(B, p_cnt, d)
+    b1_ff = bank_r1_flip.reshape(B, p_cnt, d)
+    b3_f = bank_r3.reshape(B, p_cnt, d)
+    b3_ff = bank_r3_flip.reshape(B, p_cnt, d)
 
     musc_scores = np.zeros(n_c, dtype=np.float64)
     svd_scores = np.zeros(n_c, dtype=np.float64)
+    logical_scores = np.zeros(n_c, dtype=np.float64)
+    maps_32 = np.zeros((n_c, 32, 32), dtype=np.float16)
+
     k_micro = max(1, int(round(p_cnt * 0.005)))
     k_meso = max(2, int(round(p_cnt * 0.05)))
+    chunk = 8 if p_cnt > 1600 else 16
 
-    for i in range(n_c):
-        q_hwc = torch.from_numpy(patches_np[i]).to(device=device, dtype=torch.float16)
-        q_flat = q_hwc.reshape(p_cnt, d)  # (P, D)
+    for local_i in range(n_c):
+        # Stream ONE query image at a time from disk memmap (2.8 MB!)
+        q_r1 = torch.from_numpy(np.array(mm[idx[local_i]], copy=True)).to(device=device, dtype=torch.float16)
+        q_r3 = apply_lna_r3(q_r1)
+        q1_flat = q_r1.reshape(p_cnt, d)
+        q3_flat = q_r3.reshape(p_cnt, d)
 
-        # Exclude self (and self-flip) from peer bank
-        valid_mask = bank_src_ids != i
+        valid_mask = bank_local != local_i
         if not valid_mask.any():
-            valid_mask = np.ones(B_all, dtype=bool)
+            valid_mask = np.ones(B, dtype=bool)
         vm_t = torch.from_numpy(valid_mask).to(device=device)
-        b_valid = bank_flat[vm_t]  # (M, P, D)
-        m_cnt = b_valid.shape[0]
+        m_uniq = int(valid_mask.sum())
 
-        # Compute min cosine distance from each query patch to each peer image in chunks (VRAM safe!)
-        min_dists = torch.empty((p_cnt, m_cnt), device=device, dtype=torch.float32)
-        chunk = 16
-        for s0 in range(0, m_cnt, chunk):
-            s1 = min(m_cnt, s0 + chunk)
-            # (c, P, D) @ (D, P) -> (c, P_bank, P_q) -> max over P_bank -> (c, P_q)
-            sim_blk = torch.matmul(b_valid[s0:s1], q_flat.T)  # (c, P, P)
-            max_sim = sim_blk.max(dim=1).values.float()  # (c, P_q)
-            min_dists[:, s0:s1] = (1.0 - max_sim).T
+        def _min_merged_pmap(q_fl, b_orig, b_flp):
+            bo = b_orig[vm_t]
+            bf = b_flp[vm_t]
+            dists = torch.empty((p_cnt, m_uniq), device=device, dtype=torch.float32)
+            for s0 in range(0, m_uniq, chunk):
+                s1 = min(m_uniq, s0 + chunk)
+                s_o = torch.matmul(bo[s0:s1], q_fl.T).max(dim=1).values.float()
+                s_f = torch.matmul(bf[s0:s1], q_fl.T).max(dim=1).values.float()
+                # Merge orig & flip per unique peer BEFORE sorting -> fixes duplicate-slot lo_i bug!
+                dists[:, s0:s1] = (1.0 - torch.maximum(s_o, s_f)).T
+            d_sorted, _ = torch.sort(dists, dim=1)
+            lo_i = max(1, int(m_uniq * 0.08)) if m_uniq >= 4 else 0
+            hi_i = min(m_uniq, max(lo_i + 1, int(m_uniq * 0.25)))
+            return d_sorted[:, lo_i:hi_i].mean(dim=1)
 
-        # Safe small-cluster quantile (lo_i >= 1 prevents 1-NN defect-to-defect match!)
-        d_sorted, _ = torch.sort(min_dists, dim=1)
-        lo_i = max(1, int(m_cnt * 0.05)) if m_cnt >= 4 else 0
-        hi_i = max(lo_i + 1, int(m_cnt * 0.25))
-        hi_i = min(hi_i, m_cnt)
-        pmap = d_sorted[:, lo_i:hi_i].mean(dim=1)  # (P,)
+        pmap_r1 = _min_merged_pmap(q1_flat, b1_f, b1_ff)
+        pmap_r3 = _min_merged_pmap(q3_flat, b3_f, b3_ff)
+        pmap = 0.65 * pmap_r1 + 0.35 * pmap_r3
 
-        # Multi-Granular 3-Channel Aggregation: Micro + 3x3 Spatial Co-location + Meso
         sc_micro = float(torch.topk(pmap, k=k_micro).values.mean().item())
         sc_meso = float(torch.topk(pmap, k=k_meso).values.mean().item())
         pmap_2d = pmap.reshape(1, 1, h, w)
-        pmap_3x3 = F.avg_pool2d(pmap_2d, kernel_size=3, stride=1, padding=1).reshape(-1)
-        sc_spatial = float(pmap_3x3.max().item())
-        musc_scores[i] = 0.50 * sc_micro + 0.30 * sc_spatial + 0.20 * sc_meso
+        sc_spatial = float(F.avg_pool2d(pmap_2d, kernel_size=3, stride=1, padding=1).max().item())
+        musc_scores[local_i] = 0.50 * sc_micro + 0.30 * sc_spatial + 0.20 * sc_meso
 
-        # Cluster-SVD Orthogonal Subspace Reconstruction Error
+        # Save 32x32 2D Anomaly Map for cross-backbone Mid-Level Spatial Fusion!
+        m32 = F.interpolate(pmap_2d, size=(32, 32), mode="bilinear", align_corners=False)
+        maps_32[local_i] = m32.squeeze(0).squeeze(0).cpu().numpy().astype(np.float16)
+
+        # Global Logical Anomaly Channel (catches missing components / count errors!)
+        d_cls = float(1.0 - np.dot(cls_c[local_i], bank_cls_mu))
+        q_pmu = F.normalize(q_r1.float().mean(dim=(0, 1)), dim=-1)
+        d_pmu = float(1.0 - torch.dot(q_pmu, bank_patch_mu).item())
+        logical_scores[local_i] = 0.5 * d_cls + 0.5 * d_pmu
+
+        # Cluster-SVD Subspace Reconstruction Error
         if V_svd is not None:
-            qc = q_flat.float() - mu_b
+            qc = q1_flat.float() - mu_b
             proj = (qc @ V_svd) @ V_svd.T
             recon_err = ((qc - proj) ** 2).sum(dim=-1)
-            svd_scores[i] = float(torch.topk(recon_err, k=k_micro).values.mean().item())
+            svd_scores[local_i] = float(torch.topk(recon_err, k=k_micro).values.mean().item())
         else:
-            svd_scores[i] = musc_scores[i]
+            svd_scores[local_i] = musc_scores[local_i]
 
-    del bank_t, bank_all, bank_flat, V_svd
+    del bank_r1, bank_r1_flip, bank_r3, bank_r3_flip, b1_f, b1_ff, b3_f, b3_ff, V_svd
     torch.cuda.empty_cache()
-    return musc_scores, svd_scores
+    return musc_scores, svd_scores, logical_scores, maps_32
 
 
-def run_split_layer(
+def run_split_single_pass(
     model,
-    tf,
+    norm_params: tuple,
     cfg: dict,
     data_root: Path,
     img_ids: list[str],
     split: str,
-    layer_idx: int,
-    cids: np.ndarray,
+    cids: np.ndarray | None,
+    vlm_prior: np.ndarray | None,
     tmp_dir: Path,
     device: torch.device,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Stream 1 layer to disk memmap -> score per Cluster-v2 -> delete memmap immediately."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Single-pass multi-layer extraction + streaming scoring + immediate page-cache eviction."""
     n = len(img_ids)
     bs = cfg["batch_size"]
     backend = cfg["backend"]
+    layers = cfg["layers"]
+    lweights = cfg["layer_weights"]
 
-    # Probe shape with 1st image
+    hw = pick_target_hw(data_root, img_ids, split, cfg)
+    tf = make_transform(hw, norm_params)
+
+    # Probe exact layer shapes with 1st image
     with Image.open(resolve_img_path(data_root, img_ids[0], split)) as im0:
-        x0 = tf(im0.convert("RGB")).unsqueeze(0).to(device)
-    cls0, p0 = extract_single_layer_tokens(model, backend, x0, layer_idx)
-    h, w, d = p0.shape[1], p0.shape[2], p0.shape[3]
+        x0 = tf(ImageOps.exif_transpose(im0).convert("RGB")).unsqueeze(0).to(device)
+    cls0, p0_list = extract_multi_layer_tokens(model, backend, x0, layers)
     cls_d = cls0.shape[1]
 
-    mm_path = tmp_dir / f"patches_{split}_L{layer_idx}.mmap"
-    mm = np.memmap(mm_path, dtype=np.float16, mode="w+", shape=(n, h, w, d))
+    mm_paths, mms = [], []
+    for li, p0 in enumerate(p0_list):
+        h, w, d = p0.shape[1], p0.shape[2], p0.shape[3]
+        mp = tmp_dir / f"patches_{split}_L{li}.mmap"
+        mm_paths.append(mp)
+        mms.append(np.memmap(mp, dtype=np.float16, mode="w+", shape=(n, h, w, d)))
+
     cls_all = np.zeros((n, cls_d), dtype=np.float32)
 
     for s0 in range(0, n, bs):
@@ -405,45 +546,67 @@ def run_split_layer(
         imgs = []
         for img_id in img_ids[s0:s1]:
             with Image.open(resolve_img_path(data_root, img_id, split)) as im:
-                imgs.append(tf(im.convert("RGB")))
+                imgs.append(tf(ImageOps.exif_transpose(im).convert("RGB")))
         xb = torch.stack(imgs, dim=0).to(device)
-        cb, pb = extract_single_layer_tokens(model, backend, xb, layer_idx)
+        cb, pb_list = extract_multi_layer_tokens(model, backend, xb, layers)
         cls_all[s0:s1] = cb.cpu().numpy()
-        mm[s0:s1] = pb.cpu().numpy().astype(np.float16)
+        for li, pb in enumerate(pb_list):
+            mms[li][s0:s1] = pb.cpu().numpy().astype(np.float16)
 
-    mm.flush()
-    fadvise_dontneed(mm_path)
+        # Periodic flush + page-cache eviction EVERY 128 images -> keeps cgroup RAM < 2.5 GiB!
+        if (s1 % 128) < bs or s1 == n:
+            for li, mm in enumerate(mms):
+                mm.flush()
+                fadvise_dontneed(mm_paths[li])
 
-    # Compute cluster IDs on-the-fly if not provided
+    # Compute on-the-fly Cluster-v2 if canonical_cids unavailable or mismatched (Private-Safe!)
     if cids is None:
-        cids = cluster_v2_zero_singleton(cls_all)
+        cids_fine = cluster_v2_zero_singleton(cls_all, agg_dist_thr=0.28)
+        cids_coarse = cluster_v2_zero_singleton(cls_all, agg_dist_thr=0.36)
+    else:
+        cids_fine = cids
+        cids_coarse = cids
 
-    musc_out = np.zeros(n, dtype=np.float64)
-    svd_out = np.zeros(n, dtype=np.float64)
-    for c in np.unique(cids):
-        idx = np.where(cids == c)[0]
-        if c < 0:
-            for single_i in idx:
-                m_s, s_s = score_cluster_musc_v2(np.array(mm[single_i : single_i + 1]), cls_all[single_i : single_i + 1], device)
-                musc_out[single_i] = m_s[0]
-                svd_out[single_i] = s_s[0]
-        else:
-            m_c, s_c = score_cluster_musc_v2(np.array(mm[idx]), cls_all[idx], device)
-            musc_out[idx] = m_c
-            svd_out[idx] = s_c
+    musc_tot = np.zeros(n, dtype=np.float64)
+    svd_tot = np.zeros(n, dtype=np.float64)
+    log_tot = np.zeros(n, dtype=np.float64)
+    maps_tot = np.zeros((n, 32, 32), dtype=np.float32)
 
-    del mm
-    try:
-        mm_path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    gc.collect()
-    torch.cuda.empty_cache()
-    return musc_out, svd_out
+    for li, (mm, mp, lw) in enumerate(zip(mms, mm_paths, lweights)):
+        m_out = np.zeros(n, dtype=np.float64)
+        s_out = np.zeros(n, dtype=np.float64)
+        l_out = np.zeros(n, dtype=np.float64)
+        mp_out = np.zeros((n, 32, 32), dtype=np.float16)
+
+        for c in np.unique(cids_fine):
+            idx = np.where(cids_fine == c)[0]
+            if c < 0:
+                for si in idx:
+                    ms, ss, ls, m32 = score_cluster_streaming(mm, np.array([si]), cls_all, vlm_prior, device)
+                    m_out[si], s_out[si], l_out[si], mp_out[si] = ms[0], ss[0], ls[0], m32[0]
+            else:
+                ms, ss, ls, m32 = score_cluster_streaming(mm, idx, cls_all, vlm_prior, device)
+                m_out[idx], s_out[idx], l_out[idx], mp_out[idx] = ms, ss, ls, m32
+            fadvise_dontneed(mp)
+
+        musc_tot += lw * m_out
+        svd_tot += lw * s_out
+        log_tot += lw * l_out
+        maps_tot += lw * mp_out.astype(np.float32)
+
+        # Immediately delete memmap after scoring this layer -> frees disk & page cache!
+        del mm
+        try:
+            mp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        gc.collect()
+
+    return musc_tot, svd_tot, log_tot, maps_tot.astype(np.float16), cids_coarse
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Track A MuSc-v2 Blackwell/Kaggle Automated Runner")
+    parser = argparse.ArgumentParser(description="Track A MuSc-v2 Hardened Blackwell/Kaggle Runner")
     parser.add_argument("--model", type=str, required=True, choices=list(MODEL_REGISTRY.keys()))
     parser.add_argument("--data-root", type=str, default="data/raw/open")
     parser.add_argument("--folds-json", type=str, default="runs/folds_unseen.json")
@@ -451,10 +614,10 @@ def main() -> None:
     parser.add_argument("--canonical-cids", type=str, default="runs/day0_recal/canonical_cids.npz")
     parser.add_argument("--out-dir", type=str, default="runs/musc_v2")
     parser.add_argument("--queue-models-dir", type=str, default="runs/queue15/models")
-    parser.add_argument("--folds", type=str, default="0,1,2,3,4", help="Comma-separated folds (e.g. '0' for fast gate)")
+    parser.add_argument("--folds", type=str, default="0,1,2,3,4")
     parser.add_argument("--skip-test", action="store_true")
-    parser.add_argument("--wandb", action="store_true", help="Enable W&B real-time progress logging")
-    parser.add_argument("--auto-sync", action="store_true", help="Run auto_sync_and_report.py on completion")
+    parser.add_argument("--wandb", action="store_true")
+    parser.add_argument("--auto-sync", action="store_true")
     args = parser.parse_args()
 
     t_start = time.time()
@@ -470,21 +633,23 @@ def main() -> None:
     labels_map = folds_payload["labels"]
     fold_list = [int(x.strip()) for x in args.folds.split(",") if x.strip()]
 
-    # Load shared Cluster-v2 IDs if available
-    tr_cid_map, te_cids = {}, None
+    # Load canonical_cids ONLY if IDs match (Private-Safe for arbitrary Private test sizes!)
+    tr_cid_map, te_cid_cache_ids, te_cid_cache_vals = {}, [], None
     if Path(args.canonical_cids).exists():
         cd = np.load(args.canonical_cids, allow_pickle=True)
         tr_cid_map = dict(zip([str(x) for x in cd["train_ids"]], cd["train_cids"].astype(np.int64)))
-        te_cids = cd["test_cids"].astype(np.int64)
+        te_cid_cache_ids = [str(x) for x in cd["test_ids"]]
+        te_cid_cache_vals = cd["test_cids"].astype(np.int64)
         print(f"[CLUSTER-V2] Loaded shared canonical_cids from {args.canonical_cids}", flush=True)
 
     wb_run = init_wandb_safe(args.wandb, args.model, cfg)
-    model, tf = load_backbone(cfg, device)
+    model, norm_params = load_backbone(cfg, device, pretrained=True)
 
     total_stages = len(fold_list) + (0 if args.skip_test else 1)
     done_stages = 0
 
     oof_ids_all, oof_raw_all, oof_z_all, oof_y_all = [], [], [], []
+    oof_musc_all, oof_svd_all, oof_log_all, oof_maps_all = [], [], [], []
     per_fold_aucs = {}
 
     for f in fold_list:
@@ -494,27 +659,25 @@ def main() -> None:
 
         if ckpt_p.exists():
             ck = np.load(ckpt_p, allow_pickle=True)
-            raw_f = ck["raw"].astype(np.float64)
-            z_f = ck["z"].astype(np.float64)
+            raw_f, z_f = ck["raw"].astype(np.float64), ck["z"].astype(np.float64)
+            musc_f, svd_f, log_f = ck["musc"].astype(np.float64), ck["svd"].astype(np.float64), ck["logical"].astype(np.float64)
+            maps_f = ck["maps_32"].astype(np.float16)
             print(f"[RESUME] Fold {f} loaded from {ckpt_p.name}", flush=True)
         else:
-            cids_f = np.array([tr_cid_map[i] for i in val_ids], dtype=np.int64) if tr_cid_map else None
-            musc_sum = np.zeros(len(val_ids), dtype=np.float64)
-            svd_sum = np.zeros(len(val_ids), dtype=np.float64)
-            for li, (layer_idx, lw) in enumerate(zip(cfg["layers"], cfg["layer_weights"])):
-                idx_arg = li if cfg["backend"] == "timm_cnn" else layer_idx
-                m_sc, s_sc = run_split_layer(
-                    model, tf, cfg, Path(args.data_root), val_ids, "train", idx_arg, cids_f, tmp_dir, device
-                )
-                musc_sum += lw * m_sc
-                svd_sum += lw * s_sc
-            # Blend 80% MuSc-v2 + 20% Cluster-SVD Subspace (Left-Tail calibrated per cluster)
-            cids_eff = cids_f if cids_f is not None else np.zeros(len(val_ids), dtype=np.int64)
-            z_m = left_tail_robust_z(musc_sum, cids_eff)
-            z_s = left_tail_robust_z(svd_sum, cids_eff)
-            raw_f = 0.80 * musc_sum + 0.20 * svd_sum
-            z_f = 0.80 * z_m + 0.20 * z_s
-            np.savez_compressed(ckpt_p, ids=np.array(val_ids), raw=raw_f, z=z_f, musc=musc_sum, svd=svd_sum)
+            cids_f = np.array([tr_cid_map[i] for i in val_ids], dtype=np.int64) if all(i in tr_cid_map for i in val_ids) else None
+            vlm_f = load_vlm_normal_prior(Path(args.queue_models_dir), val_ids, "train")
+            musc_f, svd_f, log_f, maps_f, cids_cal = run_split_single_pass(
+                model, norm_params, cfg, Path(args.data_root), val_ids, "train", cids_f, vlm_f, tmp_dir, device
+            )
+            z_m = left_tail_robust_z(musc_f, cids_cal)
+            z_s = left_tail_robust_z(svd_f, cids_cal)
+            z_l = left_tail_robust_z(log_f, cids_cal)
+            raw_f = 0.72 * musc_f + 0.18 * svd_f + 0.10 * log_f
+            z_f = 0.72 * z_m + 0.18 * z_s + 0.10 * z_l
+            np.savez_compressed(
+                ckpt_p, ids=np.array(val_ids), raw=raw_f, z=z_f,
+                musc=musc_f, svd=svd_f, logical=log_f, maps_32=maps_f,
+            )
 
         auc_f = float(roc_auc_score(y_f, z_f))
         per_fold_aucs[f"fold_{f}"] = round(auc_f, 4)
@@ -522,6 +685,10 @@ def main() -> None:
         oof_raw_all.append(raw_f)
         oof_z_all.append(z_f)
         oof_y_all.append(y_f)
+        oof_musc_all.append(musc_f)
+        oof_svd_all.append(svd_f)
+        oof_log_all.append(log_f)
+        oof_maps_all.append(maps_f)
 
         done_stages += 1
         elapsed = time.time() - t_start
@@ -548,8 +715,6 @@ def main() -> None:
     overall_oof = float(roc_auc_score(oof_y, oof_z))
     print(f"\n[{args.model}] Completed Folds {fold_list} -> Combined OOF AUROC = {overall_oof:.4f}", flush=True)
 
-    # Test Inference (strictly black-box numeric — ZERO image rendering!)
-    test_ids, test_raw, test_z = [], np.array([]), np.array([])
     if not args.skip_test and len(fold_list) == 5:
         with Path(args.sample_sub).open("r", encoding="utf-8-sig", newline="") as f:
             test_ids = [r["image_path"] for r in csv.DictReader(f)]
@@ -557,22 +722,29 @@ def main() -> None:
         if ckpt_te.exists():
             ck = np.load(ckpt_te, allow_pickle=True)
             test_raw, test_z = ck["raw"].astype(np.float64), ck["z"].astype(np.float64)
+            test_musc, test_svd, test_log = ck["musc"].astype(np.float64), ck["svd"].astype(np.float64), ck["logical"].astype(np.float64)
+            test_maps = ck["maps_32"].astype(np.float16)
         else:
-            musc_te = np.zeros(len(test_ids), dtype=np.float64)
-            svd_te = np.zeros(len(test_ids), dtype=np.float64)
-            for li, (layer_idx, lw) in enumerate(zip(cfg["layers"], cfg["layer_weights"])):
-                idx_arg = li if cfg["backend"] == "timm_cnn" else layer_idx
-                m_sc, s_sc = run_split_layer(
-                    model, tf, cfg, Path(args.data_root), test_ids, "test", idx_arg, te_cids, tmp_dir, device
-                )
-                musc_te += lw * m_sc
-                svd_te += lw * s_sc
-            cids_eff = te_cids if te_cids is not None else np.zeros(len(test_ids), dtype=np.int64)
-            test_raw = 0.80 * musc_te + 0.20 * svd_te
-            test_z = 0.80 * left_tail_robust_z(musc_te, cids_eff) + 0.20 * left_tail_robust_z(svd_te, cids_eff)
-            np.savez_compressed(ckpt_te, ids=np.array(test_ids), raw=test_raw, z=test_z, musc=musc_te, svd=svd_te)
+            # Strict ID-match guard for Private-Safe execution!
+            te_cids = te_cid_cache_vals if (te_cid_cache_vals is not None and te_cid_cache_ids == test_ids) else None
+            if te_cids is None:
+                print("[CLUSTER-V2] test_ids differ from cache (Private set?) -> computing Cluster-v2 on-the-fly!", flush=True)
+            vlm_te = load_vlm_normal_prior(Path(args.queue_models_dir), test_ids, "test")
+            test_musc, test_svd, test_log, test_maps, cids_te_cal = run_split_single_pass(
+                model, norm_params, cfg, Path(args.data_root), test_ids, "test", te_cids, vlm_te, tmp_dir, device
+            )
+            test_raw = 0.72 * test_musc + 0.18 * test_svd + 0.10 * test_log
+            test_z = (
+                0.72 * left_tail_robust_z(test_musc, cids_te_cal)
+                + 0.18 * left_tail_robust_z(test_svd, cids_te_cal)
+                + 0.10 * left_tail_robust_z(test_log, cids_te_cal)
+            )
+            np.savez_compressed(
+                ckpt_te, ids=np.array(test_ids), raw=test_raw, z=test_z,
+                musc=test_musc, svd=test_svd, logical=test_log, maps_32=test_maps,
+            )
 
-        # Save final Queue15-compatible .npz cache!
+        # Save lightweight .npz into queue15/models/ (~120 KB) + 32x32 2D maps separately (~23 MB)
         out_npz = Path(args.queue_models_dir) / f"{args.model}.npz"
         out_npz.parent.mkdir(parents=True, exist_ok=True)
         meta = {
@@ -588,12 +760,25 @@ def main() -> None:
             oof_ids=np.array(oof_ids_all),
             oof_raw=oof_raw,
             oof_z=oof_z,
+            oof_musc=np.concatenate(oof_musc_all),
+            oof_svd=np.concatenate(oof_svd_all),
+            oof_logical=np.concatenate(oof_log_all),
             test_ids=np.array(test_ids),
             test_raw=test_raw,
             test_z=test_z,
+            test_musc=test_musc,
+            test_svd=test_svd,
+            test_logical=test_log,
             meta_json=json.dumps(meta),
         )
-        print(f"[SAVED QUEUE CACHE] {out_npz} (OOF={overall_oof:.4f})", flush=True)
+        np.savez_compressed(
+            work_dir / f"{args.model}_maps32.npz",
+            oof_ids=np.array(oof_ids_all),
+            oof_maps_32=np.concatenate(oof_maps_all, axis=0),
+            test_ids=np.array(test_ids),
+            test_maps_32=test_maps,
+        )
+        print(f"[SAVED QUEUE CACHE] {out_npz} (OOF={overall_oof:.4f}) + 32x32 2D maps", flush=True)
 
     write_progress(
         prog_path,
