@@ -54,6 +54,30 @@ except RuntimeError:
 
 
 MODEL_REGISTRY = {
+    "M20_musc_dinov2_l518_v2": {
+        "paradigm": "A_MuSc_v2_DINOv2L",
+        "backend": "timm_vit",
+        "backbone": "vit_large_patch14_dinov2.lvd142m",
+        "img_size": 518,
+        "native_ar": True,
+        "layers": [17, 23],
+        "layer_weights": [0.6, 0.4],
+        "channel_weights": [0.65, 0.35, 0.00],
+        "batch_size": 6,
+        "license": "Apache-2.0 (Meta 2023)",
+    },
+    "M21_musc_dinov2_b518_v2": {
+        "paradigm": "A_MuSc_v2_DINOv2B",
+        "backend": "timm_vit",
+        "backbone": "vit_base_patch14_dinov2.lvd142m",
+        "img_size": 518,
+        "native_ar": True,
+        "layers": [8, 11],
+        "layer_weights": [0.6, 0.4],
+        "channel_weights": [0.65, 0.35, 0.00],
+        "batch_size": 8,
+        "license": "Apache-2.0 (Meta 2023)",
+    },
     "M16_musc_dinov2_reg4_l": {
         "paradigm": "A_MuSc_v2_Reg4",
         "backend": "timm_vit",
@@ -62,7 +86,7 @@ MODEL_REGISTRY = {
         "native_ar": True,  # (448, 672) for W/H>=1.25, (672, 448) for H/W>=1.25, else (518, 518)
         "layers": [17, 23],
         "layer_weights": [0.6, 0.4],
-        "channel_weights": [0.72, 0.18, 0.10],
+        "channel_weights": [0.65, 0.35, 0.00],
         "batch_size": 6,
         "license": "Apache-2.0 (Meta 2023)",
     },
@@ -388,22 +412,12 @@ def score_cluster_streaming(
     else:
         purity = den_z
 
-    # Select top 45% purest normal pool, capped at 120 peers via greedy farthest-point diversity
-    pool_sz = max(2, min(n_c, int(round(0.50 * n_c))))
+    # Select top 45% purest normal pool, capped at 96 peers by HIGHEST PURITY (NEVER Farthest-Point outliers!)
+    pool_sz = max(2, min(n_c, int(round(0.45 * n_c))))
     pure_order = np.argsort(purity)[::-1][:pool_sz]
-    max_bank = 120
-    if len(pure_order) > max_bank:
-        # Farthest-point coreset inside pure normal pool (Scale-Invariant!)
-        selected = [int(pure_order[0])]
-        cand = cls_c[pure_order]
-        min_d = 1.0 - (cand @ cand[0])
-        for _ in range(max_bank - 1):
-            nxt = int(np.argmax(min_d))
-            selected.append(int(pure_order[nxt]))
-            min_d = np.minimum(min_d, 1.0 - (cand @ cand[nxt]))
-        bank_local = np.array(selected, dtype=np.int64)
-    else:
-        bank_local = pure_order
+    max_bank = 96
+    bank_local = pure_order[:max_bank].astype(np.int64)
+    bank_cls = cls_c[bank_local]  # (B, D_cls) for Query-Adaptive Local Top-K peer selection!
 
     # Load ONLY bank_local images (<= 120 imgs -> <= 330 MB RAM/VRAM!)
     bank_np = np.stack([np.array(mm[idx[bi]], copy=True) for bi in bank_local], axis=0)  # (B, H, W, D)
@@ -456,8 +470,13 @@ def score_cluster_streaming(
         valid_mask = bank_local != local_i
         if not valid_mask.any():
             valid_mask = np.ones(B, dtype=bool)
-        vm_t = torch.from_numpy(valid_mask).to(device=device)
-        m_uniq = int(valid_mask.sum())
+        # Query-Adaptive Local Top-K Peers (K=32 closest visual peers in CLS space -> immune to merged products!)
+        q_sims_to_bank = cls_c[local_i] @ bank_cls.T
+        q_sims_to_bank = np.where(valid_mask, q_sims_to_bank, -2.0)
+        k_local = min(32, int(valid_mask.sum()))
+        top_local_idx = np.argsort(q_sims_to_bank)[::-1][:k_local]
+        vm_t = torch.from_numpy(top_local_idx.copy()).to(device=device, dtype=torch.long)
+        m_uniq = k_local
 
         def _min_merged_pmap(q_fl, b_orig, b_flp):
             bo = b_orig[vm_t]
@@ -568,8 +587,25 @@ def run_split_single_pass(
         cids_fine = cluster_v2_zero_singleton(cls_all, agg_dist_thr=0.28)
         cids_coarse = cluster_v2_zero_singleton(cls_all, agg_dist_thr=0.36)
     else:
-        cids_fine = cids
-        cids_coarse = cids
+        cids_fine = cids.copy()
+        cids_coarse = cids.copy()
+
+    # Auto-split giant merged clusters (e.g., F0 cid=2 n=2200 = 2 merged products!) into pure sub-clusters
+    from sklearn.cluster import MiniBatchKMeans
+
+    next_cid = int(cids_fine.max()) + 1 if len(cids_fine) > 0 else 0
+    for c in list(np.unique(cids_fine)):
+        if c < 0:
+            continue
+        idx_c = np.where(cids_fine == c)[0]
+        if len(idx_c) > 450:
+            k_sub = max(2, min(6, int(round(len(idx_c) / 350.0))))
+            km = MiniBatchKMeans(n_clusters=k_sub, random_state=42, batch_size=256, n_init=3)
+            sub_l = km.fit_predict(cls_all[idx_c])
+            for sl in range(k_sub):
+                cids_fine[idx_c[sub_l == sl]] = next_cid
+                next_cid += 1
+    cids_coarse = cids_fine.copy()
 
     musc_tot = np.zeros(n, dtype=np.float64)
     svd_tot = np.zeros(n, dtype=np.float64)
