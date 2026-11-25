@@ -3,26 +3,27 @@
 > **규칙**: 이 파일은 **항상 덮어쓴다(누적 금지)**. 새 연구원 세션은 `AGENTS.md` → `STATE.md` → `EXPERIMENTS.md` 3개만 읽고 즉시 작업을 이어간다. **Test 이미지 육안 열람은 엄격히 금지한다.**
 
 ## 1. 현재 Champion & 검증 기준
-- **CV Split**: `runs/folds_unseen.json` (Train 10,821장 / 5-Fold Unseen) + **`Sim-LB-800`** (`scripts/sim_lb_800.py`)
+- **CV Split**: `runs/folds_unseen.json` (Train 10,821장 / 5-Fold Unseen) + **`Sim-LB-800`** (200회 파편화·가변불량률 스트레스 게이트)
 - **Public LB 1위**: **`E14-Q15`** (`Elite-9`, OOF `0.9520` / Public LB `0.884610`)
-- **단일 모델 역대 1위**: **`M18_musc_siglip_so400m_384` (OOF `0.9261`, F0 `0.9171`, F4 `0.9732`, `ρ(M01)=0.604`)**
-- **CV 앙상블 역대 최고 (Train-Only Nested 5-Fold)**: **`Elite-9 + M16_svd + M18_opt` = `0.9583` (`+0.0063`, F0 `0.9070→0.9253 (+0.0183)`, 5-Fold 전원 상승)**!
-- **W&B Artifact 동기화**: `dku-model-cache:latest` 최신 반영 완료 (`M01~M19.npz` + `canonical_cids.npz` + `folds_unseen.json`, **24 files**).
+- **NEW CV + Sim-LB Champion (`E20-TrackAB`, `scripts/run_track_b_v2_final.py`)**:
+  - **`E20b_Spatial` (`LT-Elite9 + M16_svd + M18_opt + SP4_top2`, `z_plus_rg`, NN-BCE)**:
+    - **Nested 5-Fold OOF = `0.9572`** (`E15 0.9505` 대비 **`+0.0067`**, `E14 0.9520` 대비 **`+0.0052`**)
+    - **Fold Mean = `0.9660`** (`F0 0.9292 (+0.0222 vs E14)`, `F1 0.9551`, `F2 0.9730`, `F3 0.9856`, `F4 0.9870`)
+    - **Sim-LB-800 (200 Worlds)**: **`0.9635 → 0.9684 (+0.0049)`**, **P10 Worst-10% `0.9444 → 0.9492 (+0.0048)`**
+  - **검증 완료 제출 후보 CSV (801행, ID 100% 일치, NaN/Inf 0)**:
+    - 주력: `runs/submissions/sub_e20_track_ab_final.csv` (`E20b_Spatial`)
+    - 백업(Zero Selection Bias): `runs/submissions/sub_e20_6tower_all19.csv` (`E20d_6Tower_All19`, OOF `0.9541`, Sim-LB `0.9664`)
+- **W&B Artifact 동기화**: `dku-model-cache:latest` 최신 (`M01~M19.npz` + `canonical_cids.npz` + `folds_unseen.json`, 24 files).
 
-## 2. Track A Blackwell 자가 최적화 루프 4종 완주 요약 (`M16~M19`, 총 ~53분, 크래시 0회)
-- **M16 (`DINOv2-Reg4-L`, 19.3분, `(0.72/0.18/0.10)`)**: `0.8996` (`ρ(M01)=0.775`); **`z_svd 0.9191`** (`F0 0.9016`, `cid=2 0.8517` vs `M01 0.7846`, `ρ=0.693`), `z_musc 0.8933`, `z_log 0.7545`.
-- **M17 (`EVA-02-L MIM`, 12.0분, `(0.40/0.60/0.00)`)**: `0.8901` (`F4 0.9731`, `ρ=0.611`, `M12` 대비 `+0.1190`); `z_musc 0.8983` >> `z_svd 0.8503` > `z_log 0.8061` (최적 `0.8991`).
-- **M18 (`SigLIP-SO400M-384 VLM`, 11.8분, `(0.80/0.20/0.00)`)**: **`0.9261` (단일 1위!)**, `F0 0.9171`, `cid=2 0.8760 (+0.0914)`, `ρ(M01)=0.604`; `z_musc 0.9268` > `z_svd 0.8888` > `z_log 0.8226` (최적 `(0.75/0.12/0.12)` `0.9290`; M17→M18 보정이 `+0.0092` 방어).
-- **M19 (`ConvNeXt-L-384 CLIP CNN`, 10.2분, `(0.75/0.15/0.10)`, VRAM `0.54~1.14G`)**: `0.8134` (`ρ(M01)=0.476`, `M14` 대비 `+0.0245`; M18→M19 보정이 `+0.0071` 개선); `z_svd 0.8282` > `z_musc 0.7969` > `z_log 0.7275` (최적 `(0/0.75/0.25)` `0.8408`).
-- **축적된 4대 실측 노하우**:
-  1. **백본별 최적 채널 분화**: DINOv2-Reg4(`M16`)·ConvNeXt-CNN(`M19`)은 선형 저랭크 **`z_svd`**가 강세, 반면 비선형 MIM(`M17`)·VLM(`M18`)은 비모수 패치 **`z_musc`**가 압도(`+0.04`).
-  2. **CLIP 계열 글로벌 논리 채널 유효**: CLIP/VLM 사전학습(`M18`, `M19`)에서 `z_logical(0.10)` 혼합이 F1~F4에서 `+0.003~+0.007` 일관 순증.
-  3. **비가지치기 합산 주의**: 19-모델 일괄 합산(`Elite-13 0.9491`)은 저점 모델(`M19 0.8134`)과 `M16/M17` 우측 꼬리 분산(`max 13.2`)으로 희석됨 → **채널 선택·꼬리 클리핑·가지치기** 시 **`0.9583`**으로 급등.
-  4. **32×32 공간 이상맵 4종 보존 완료**: `runs/musc_v2/M16~M19/*_maps32.npz` (교차 백본 Mid-Level Spatial Map Fusion 준비 완료).
+## 2. Track A (`M16~M19`) + Track B (`E20`) 핵심 돌파구 요약
+- **단일 모델 1위**: `M18_musc_siglip_so400m_384` (**`0.9261`**, `F0 0.9171`, `cid=2 0.8760 (+0.0914 vs M01)`, `ρ(M01)=0.604`).
+- **Mid-Level `32×32` 공간맵 픽셀정렬 합의 (`SP4_top2`)**: 4종 이종 백본(`DINOv2-Reg4` + `EVA-02` + `SigLIP` + `ConvNeXt-L`)의 클러스터 정규화 `32×32` 맵에서 픽셀별 2순위 합의 추출 → **단일 비지도 특성 `0.9308` (`F4 0.9809`, `ρ(M01)=0.695`)**로 모든 단일 모델 추월!
+- **백본별 채널 분화 실증**: `M16(DINOv2-Reg4)`·`M19(ConvNeXt-L)`은 저랭크 `z_svd` 강세(`0.9191`, `0.8282`), `M17(EVA-02)`·`M18(SigLIP)`은 `z_musc` 압도(`0.8983`, `0.9268`), CLIP 계열(`M18`, `M19`)은 글로벌 `z_logical(0.10)` 유효.
 
 ## 3. 절대 다시 하지 말 것 (Dead Ends)
 - Test 이미지 육안 열람 / 외부 데이터·라벨 조회 / Git에 Drive ID·`runs/`·`artifacts/` 커밋
-- 비-DINOv2 백본에 `w_svd >= 0.50` 과다 배정 / 저점 모델 비가지치기 등가중 합산 / E2E 파인튜닝(`M15`)
+- `Sim-LB-800` 월드 생성 시 이상치 점수 기반 클러스터링 금지(반드시 시각 제품 `cids`만 사용)
+- 비-DINOv2 백본에 `w_svd >= 0.50` 과다 배정 / 저점 모델 비가지치기 등가중 합산
 
-## 4. 다음 행동 1개 (Track B 최종 앙상블 통합)
-- `M01~M19` 전체 캐시 + `M16~M19` 3채널(`musc/svd/logical`) & `32×32` 공간맵을 결합해 **`Cluster-v2 + Left-Tail Z + Sim-LB-800` 200회 게이트**로 채널별 가지치기 스태킹(`0.9583+`)을 검증하고 최종 제출 후보 CSV 생성 (`git push`는 인증 갱신 후 일괄 반영).
+## 4. 다음 행동 1개
+- 사용자 승인 후 `runs/submissions/sub_e20_track_ab_final.csv` Public LB 제출 검증 (`E14 0.8846` 대비 실제 LB 점프폭 확인) 및 `runs/track_b_v2/val_oof_e20.json` 기반 Train 오답 Top-20 분석.
