@@ -4,26 +4,22 @@
 
 ## 1. 현재 Champion & 검증 기준
 - **CV Split**: `runs/folds_unseen.json` (Train 10,821장 / 5-Fold Unseen) + **`Sim-LB-800`** (200회 파편화·가변불량률 스트레스 게이트)
-- **Public LB 1위**: **`E14-Q15`** (`Elite-9`, OOF `0.9520` / Public LB `0.884610`)
-- **NEW CV + Sim-LB Champion (`E20-TrackAB`, `scripts/run_track_b_v2_final.py`)**:
-  - **`E20b_Spatial` (`LT-Elite9 + M16_svd + M18_opt + SP4_top2`, `z_plus_rg`, NN-BCE)**:
-    - **Nested 5-Fold OOF = `0.9572`** (`E15 0.9505` 대비 **`+0.0067`**, `E14 0.9520` 대비 **`+0.0052`**)
-    - **Fold Mean = `0.9660`** (`F0 0.9292 (+0.0222 vs E14)`, `F1 0.9551`, `F2 0.9730`, `F3 0.9856`, `F4 0.9870`)
-    - **Sim-LB-800 (200 Worlds)**: **`0.9635 → 0.9684 (+0.0049)`**, **P10 Worst-10% `0.9444 → 0.9492 (+0.0048)`**
-  - **검증 완료 제출 후보 CSV (801행, ID 100% 일치, NaN/Inf 0)**:
-    - 주력: `runs/submissions/sub_e20_track_ab_final.csv` (`E20b_Spatial`)
-    - 백업(Zero Selection Bias): `runs/submissions/sub_e20_6tower_all19.csv` (`E20d_6Tower_All19`, OOF `0.9541`, Sim-LB `0.9664`)
-- **W&B Artifact 동기화**: `dku-model-cache:latest` 최신 (`M01~M19.npz` + `canonical_cids.npz` + `folds_unseen.json`, 24 files).
+- **NEW CV + Public LB Champion (`E20-TrackAB`, `scripts/run_track_b_v2_final.py`)**:
+  - **Public LB = `0.926148`** (`E14 0.884610` 대비 **`+0.041538` 수직 상승!**, CV-LB 갭 `-0.0674 → -0.0311` 절반 이상 축소)
+  - **Nested 5-Fold OOF = `0.9572`** (`Fold Mean 0.9660`: `F0 0.9292`, `F1 0.9551`, `F2 0.9730`, `F3 0.9856`, `F4 0.9870`), **Sim-LB-800 = `0.9684` (`P10 0.9492`)**
+  - 제출 CSV: `runs/submissions/sub_e20_track_ab_final.csv` (W&B `dku-submissions:latest`)
+- **W&B Artifact 동기화**: `dku-model-cache:latest` (`M01~M19.npz` 등 24개) & `dku-submissions:latest` 최신 반영 완료.
 
-## 2. Track A (`M16~M19`) + Track B (`E20`) 핵심 돌파구 요약
-- **단일 모델 1위**: `M18_musc_siglip_so400m_384` (**`0.9261`**, `F0 0.9171`, `cid=2 0.8760 (+0.0914 vs M01)`, `ρ(M01)=0.604`).
-- **Mid-Level `32×32` 공간맵 픽셀정렬 합의 (`SP4_top2`)**: 4종 이종 백본(`DINOv2-Reg4` + `EVA-02` + `SigLIP` + `ConvNeXt-L`)의 클러스터 정규화 `32×32` 맵에서 픽셀별 2순위 합의 추출 → **단일 비지도 특성 `0.9308` (`F4 0.9809`, `ρ(M01)=0.695`)**로 모든 단일 모델 추월!
-- **백본별 채널 분화 실증**: `M16(DINOv2-Reg4)`·`M19(ConvNeXt-L)`은 저랭크 `z_svd` 강세(`0.9191`, `0.8282`), `M17(EVA-02)`·`M18(SigLIP)`은 `z_musc` 압도(`0.8983`, `0.9268`), CLIP 계열(`M18`, `M19`)은 글로벌 `z_logical(0.10)` 유효.
+## 2. `0.9261 → 0.98+` 남은 4대 병목 (트러블슈팅 우선순위)
+1. **병목 1 (가장 큰 손실 — `M01/M06` 레거시 19% Singleton 잔존)**: `E20`에서 `M01(0.107)`+`M06(0.099)` = **20.6% 가중치**가 여전히 구형 `M01/M06` 캐시(Test 152장 `cid=-1` 동료비교 꺼진 상태의 `oof_raw/test_raw`!)를 사용 중 → **Cluster-v2(`0.12%` singleton) 네이티브 DINOv2-L/B MuSc-v2 재추출** 시 즉각 점프 유력.
+2. **병목 2 (`M16/M17` Farthest-Point 뱅크 오염 버그)**: `run_musc_v2_blackwell.py` L391 `argmax(min_d)`가 대형 클러스터(`n>240`)에서 정상 코어 대신 풀 내 극단치/이상치를 뱅크로 선발해 `M16_musc F0 cid=2 0.6401`, `M17_musc 0.6879`로 급락 → **Top-Purity Core + Query-Local kNN Bank** 교정 시 `M16/M17` 및 `SP4_top2` 동반 폭등.
+3. **병목 3 (글로벌 Rank-Gauss + 소형 클러스터/불량률 편향)**: `z_plus_rg`가 전체 800장 기준 Rank-Gauss를 섞어 소형 클러스터의 실제 극단 꼬리 신호를 압축하고, `M01~M19` 중 지도학습 모델(`M04/M07/M08/M09/M14`, 총 33% 가중치)이 Unseen 도메인 시프트로 CV-LB 갭(`-0.0311`)의 주원인.
+4. **병목 4 (해상도·공간 정밀도 & Train 오답 미해결)**: `SP4_top2`가 `32×32`로 다운샘플되어 초미세 PCB/찍힘 결함이 희석됨 (`runs/track_b_v2/val_oof_e20.json` 기준 Train FP/FN Top-20 오답 주도 EDA 즉시 수행 필요).
 
 ## 3. 절대 다시 하지 말 것 (Dead Ends)
 - Test 이미지 육안 열람 / 외부 데이터·라벨 조회 / Git에 Drive ID·`runs/`·`artifacts/` 커밋
-- `Sim-LB-800` 월드 생성 시 이상치 점수 기반 클러스터링 금지(반드시 시각 제품 `cids`만 사용)
-- 비-DINOv2 백본에 `w_svd >= 0.50` 과다 배정 / 저점 모델 비가지치기 등가중 합산
+- `Sim-LB-800` 월드 생성 시 이상치 점수 기반 클러스터링 금지 / 비-DINOv2에 `w_svd >= 0.50` 과다 배정 / E2E 파인튜닝(`M15`)
 
-## 4. 다음 행동 1개
-- 사용자 승인 후 `runs/submissions/sub_e20_track_ab_final.csv` Public LB 제출 검증 (`E14 0.8846` 대비 실제 LB 점프폭 확인) 및 `runs/track_b_v2/val_oof_e20.json` 기반 Train 오답 Top-20 분석.
+## 4. 다음 행동 1개 (카본 Medium 핸드오프 1순위)
+1. `runs/track_b_v2/val_oof_e20.json`으로 **Train-Only FP/FN Top-20 오답 분석** 실행 (어떤 제품군·결함 유형이 `0.9572 → 0.98+`를 막는지 확정).
+2. **One-Change 1순위**: `run_musc_v2_blackwell.py`의 **Farthest-Point 뱅크 오염(`argmax(min_d)`) 수정** 후 `M16(DINOv2-Reg4)`·`M01-v2(DINOv2-L Cluster-v2 네이티브)` 재추출로 19% Singleton 잔존 + `cid=2` 붕괴 동시 해결.
