@@ -99,7 +99,7 @@ MODEL_REGISTRY = {
         "native_ar": False,
         "layers": [1, 2],  # Stage-2 (48x48 kept native!) & Stage-3 (24x24)
         "layer_weights": [0.45, 0.55],
-        "channel_weights": [0.80, 0.20, 0.00],
+        "channel_weights": [0.75, 0.15, 0.10],  # One-Change from M18 audit: CLIP global logical (+0.0029) & trim non-DINOv2 svd
         "batch_size": 6,
         "license": "MIT (LAION/Meta 2023)",
     },
