@@ -48,6 +48,12 @@ def main() -> None:
             for p in sorted(models_dir.glob("M*.npz")):
                 art.add_file(str(p), name=f"queue15/models/{p.name}")
                 count += 1
+        # Also sync lightweight 32x32 2D spatial anomaly maps (~19MB each) for cross-backbone SP_top2 fusion!
+        musc_dir = Path("runs/musc_v2")
+        if musc_dir.exists():
+            for mp in sorted(musc_dir.glob("*/*_maps32.npz")):
+                art.add_file(str(mp), name=f"musc_v2/{mp.parent.name}/{mp.name}")
+                count += 1
         for rel in [
             "folds_unseen.json",
             "day0_recal/canonical_cids.npz",
